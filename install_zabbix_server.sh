@@ -56,6 +56,7 @@ if [ -z "$DB_HOST" ]; then
   fi
   [ -n "$DB_PASS" ] || DB_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
   runuser -u postgres -- psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
+    && runuser -u postgres -- psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASS'" \
     || runuser -u postgres -- psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS'"
   runuser -u postgres -- psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
     || runuser -u postgres -- createdb -O "$DB_USER" "$DB_NAME"
