@@ -42,6 +42,7 @@ if [ -n "$TLS_CERT" ]; then
   setkey TLSConnect cert; setkey TLSAccept cert
   setkey TLSCAFile "$TLS_CA"; setkey TLSCertFile "$TLS_CERT"; setkey TLSKeyFile "$TLS_KEY"
 fi
+chown root:zabbix "$CONF"; chmod 640 "$CONF"
 mkdir -p /var/lib/zabbix && chown zabbix:zabbix /var/lib/zabbix
 
 systemctl enable zabbix-proxy zabbix-agent2
