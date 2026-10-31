@@ -46,7 +46,9 @@ if [ -z "$DB_HOST" ]; then
     curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor --yes -o /usr/share/keyrings/timescaledb.gpg
     echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/debian/ ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/timescaledb.list
     apt-get update
-    apt-get install -y "timescaledb-2-postgresql-${PGMAJOR}" || { log "timescaledb package unavailable for ${VERSION_CODENAME}/pg${PGMAJOR}"; exit 1; }
+    # Zabbix 7.0 refuses a TimescaleDB newer than 2.30.x, so pin and hold it.
+    TSV=$(apt-cache madison "timescaledb-2-postgresql-${PGMAJOR}" | awk -F'|' '{gsub(/ /,"",$2); print $2}' | grep '^2\.30\.' | head -1)
+    apt-get install -y --allow-downgrades "timescaledb-2-postgresql-${PGMAJOR}=${TSV}" "timescaledb-2-loader-postgresql-${PGMAJOR}=${TSV}" && apt-mark hold "timescaledb-2-postgresql-${PGMAJOR}" "timescaledb-2-loader-postgresql-${PGMAJOR}" || { log "timescaledb package unavailable for ${VERSION_CODENAME}/pg${PGMAJOR}"; exit 1; }
     PGCONF=$(ls /etc/postgresql/${PGMAJOR}/main/postgresql.conf)
     grep -q "^shared_preload_libraries.*timescaledb" "$PGCONF" || echo "shared_preload_libraries = 'timescaledb'" >> "$PGCONF"
     systemctl restart postgresql
