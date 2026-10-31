@@ -34,7 +34,7 @@ if ! dpkg -s zabbix-release >/dev/null 2>&1; then
   dpkg -i /tmp/zbx-release.deb
 fi
 apt-get update
-apt-get install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent2 postgresql-client curl gnupg openssl
+apt-get install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent2 postgresql-client php-pgsql curl gnupg openssl
 
 if [ -z "$DB_HOST" ]; then
   log "no --db-host: installing local PostgreSQL"
