@@ -40,11 +40,26 @@ if [ -z "$DB_HOST" ]; then
   log "no --db-host: installing local PostgreSQL"
   apt-get install -y postgresql
   DB_HOST=localhost
+  if [ "$TIMESCALE" = 1 ]; then
+    PGMAJOR=$(ls /usr/lib/postgresql | sort -n | tail -1)
+    . /etc/os-release
+    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor --yes -o /usr/share/keyrings/timescaledb.gpg
+    echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/debian/ ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/timescaledb.list
+    apt-get update
+    apt-get install -y "timescaledb-2-postgresql-${PGMAJOR}" || { log "timescaledb package unavailable for ${VERSION_CODENAME}/pg${PGMAJOR}"; exit 1; }
+    PGCONF=$(ls /etc/postgresql/${PGMAJOR}/main/postgresql.conf)
+    grep -q "^shared_preload_libraries.*timescaledb" "$PGCONF" || echo "shared_preload_libraries = 'timescaledb'" >> "$PGCONF"
+    systemctl restart postgresql
+    sleep 3
+  fi
   [ -n "$DB_PASS" ] || DB_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
   runuser -u postgres -- psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
     || runuser -u postgres -- psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS'"
   runuser -u postgres -- psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
     || runuser -u postgres -- createdb -O "$DB_USER" "$DB_NAME"
+  if [ "$TIMESCALE" = 1 ]; then
+    runuser -u postgres -- psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE"
+  fi
 fi
 
 if [ -n "$ADMIN_USER" ]; then
