@@ -99,6 +99,36 @@ sed -i -e "s|^#\? *DBHost=.*|DBHost=$DB_HOST|" -e "s|^#\? *DBName=.*|DBName=$DB_
        -e "s|^#\? *DBPort=.*|DBPort=$DB_PORT|" "$CONF"
 chmod 640 "$CONF"
 
+# Pre-seed the web frontend config so the setup wizard is skipped.
+mkdir -p /etc/zabbix/web
+cat > /etc/zabbix/web/zabbix.conf.php <<PHP
+<?php
+\$DB['TYPE']     = 'POSTGRESQL';
+\$DB['SERVER']   = '$DB_HOST';
+\$DB['PORT']     = '$DB_PORT';
+\$DB['DATABASE'] = '$DB_NAME';
+\$DB['USER']     = '$DB_USER';
+\$DB['PASSWORD'] = '$DB_PASS';
+\$DB['SCHEMA']   = '';
+\$DB['ENCRYPTION'] = false;
+\$DB['KEY_FILE'] = '';
+\$DB['CERT_FILE'] = '';
+\$DB['CA_FILE'] = '';
+\$DB['VERIFY_HOST'] = false;
+\$DB['CIPHER_LIST'] = '';
+\$DB['VAULT'] = '';
+\$DB['VAULT_URL'] = '';
+\$DB['VAULT_DB_PATH'] = '';
+\$DB['VAULT_TOKEN'] = '';
+\$DB['VAULT_CERT_FILE'] = '';
+\$DB['VAULT_KEY_FILE'] = '';
+\$DB['DOUBLE_IEEE754'] = true;
+\$ZBX_SERVER_NAME = 'LM Zabbix';
+\$IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+PHP
+chown root:www-data /etc/zabbix/web/zabbix.conf.php
+chmod 640 /etc/zabbix/web/zabbix.conf.php
+
 sed -i -e "s|^#\? *listen .*80;|        listen 80;|" -e "s|^#\? *server_name .*|        server_name $SERVER_NAME;|" \
   /etc/zabbix/nginx.conf
 rm -f /etc/nginx/sites-enabled/default
