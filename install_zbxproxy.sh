@@ -27,7 +27,10 @@ if ! dpkg -s zabbix-release >/dev/null 2>&1; then
   dpkg -i /tmp/zbx-release.deb
 fi
 apt-get update
-apt-get install -y zabbix-proxy-sqlite3 zabbix-agent2
+# Default packaged config can't start (no valid Server); block the postinst start, configure, then start.
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+apt-get install -y zabbix-proxy-sqlite3 zabbix-agent2 || { rm -f /usr/sbin/policy-rc.d; exit 1; }
+rm -f /usr/sbin/policy-rc.d
 
 CONF=/etc/zabbix/zabbix_proxy.conf
 setkey() { grep -q "^$1=" "$CONF" && sed -i "s|^$1=.*|$1=$2|" "$CONF" || echo "$1=$2" >> "$CONF"; }
