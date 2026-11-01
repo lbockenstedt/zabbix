@@ -66,8 +66,9 @@ class ZabbixSpoke(BaseSpoke):
 
     async def _dispatch(self, cmd: str, data: Dict[str, Any]) -> Dict[str, Any]:
         if cmd == "UPDATE_CONFIG":
-            self.config = data
-            self.engine.set_config(data)
+            # Merge: the hub's pushed config may omit the role-load config (url/token).
+            self.config = {**(self.config or {}), **data}
+            self.engine.set_config(self.config)
             return {"status": "SUCCESS", "message": "zabbix configuration updated from Hub"}
         if cmd in ("GET_VERSION", "GET-VERSION"):
             return {"status": "SUCCESS", "version": self.get_version()}
