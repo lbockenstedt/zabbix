@@ -37,7 +37,7 @@ class ZabbixSpoke(BaseSpoke):
         return {k: ("********" if k in _SENSITIVE else v) for k, v in data.items()}
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS,
+        """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS, MON_HOSTS,
         MON_SYNC (devices, dry_run), MON_REBUILD (devices; full repopulate)."""
         cmd = (command_type or "").upper()
         logger.info("Handling Zabbix command: %s with data %s", command_type,
@@ -74,6 +74,8 @@ class ZabbixSpoke(BaseSpoke):
             return {"status": "SUCCESS", "version": self.get_version()}
         if cmd == "MON_STATUS":
             return {"status": "SUCCESS", **await self.engine.status()}
+        if cmd == "MON_HOSTS":
+            return {"status": "SUCCESS", **await self.engine.hosts()}
         if cmd in ("MON_SYNC", "MON_REBUILD"):
             devices = data.get("devices")
             if not isinstance(devices, list):

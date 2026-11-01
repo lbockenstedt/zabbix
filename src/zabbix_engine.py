@@ -39,6 +39,50 @@ class ZabbixEngine:
         return {"version": version, "managed_hosts": int(managed),
                 "last_sync": self.last_sync}
 
+    async def hosts(self) -> Dict[str, Any]:
+        """Managed hosts with availability and open problems (read-only)."""
+        api = self._client()
+        found = await api.call("host.get", {
+            "output": ["hostid", "name", "status"], "selectTags": "extend",
+            "selectInterfaces": ["type", "ip", "available", "error"],
+            "selectParentTemplates": ["name"],
+            "tags": [{"tag": "lm-managed", "value": "1", "operator": 1}]})
+        problems = await api.call("problem.get", {
+            "output": ["eventid", "objectid", "name", "severity", "clock"],
+            "recent": False, "suppressed": False, "sortfield": "eventid", "sortorder": "DESC",
+            "limit": 500})
+        trig = {}
+        if problems:
+            for t in await api.call("trigger.get", {
+                    "output": ["triggerid"], "selectHosts": ["hostid"],
+                    "triggerids": [p["objectid"] for p in problems]}):
+                trig[t["triggerid"]] = [h["hostid"] for h in t.get("hosts", [])]
+        by_host: Dict[str, List[Dict[str, Any]]] = {}
+        for p in problems:
+            for hid in trig.get(p["objectid"], []):
+                by_host.setdefault(hid, []).append(
+                    {"name": p["name"], "severity": int(p["severity"]), "clock": int(p["clock"])})
+        rows = []
+        for h in found:
+            tags = {t["tag"]: t["value"] for t in h.get("tags", [])}
+            key = tags.get("lm-key", "")
+            ifs = h.get("interfaces", [])
+            snmp = [i for i in ifs if str(i.get("type")) == "2"]
+            iface = snmp[0] if snmp else (ifs[0] if ifs else {})
+            avail = {"0": "unknown", "1": "available", "2": "unavailable"}.get(
+                str(iface.get("available", "0")), "unknown")
+            probs = by_host.get(h["hostid"], [])
+            rows.append({
+                "name": key.split("/", 1)[-1] if key else h["name"],
+                "tenant": key.split("/", 1)[0] if "/" in key else "default",
+                "ip": iface.get("ip", ""), "method": "SNMP" if snmp else "ICMP",
+                "availability": avail, "error": (iface.get("error") or "")[:160],
+                "enabled": str(h["status"]) == "0",
+                "templates": [t["name"] for t in h.get("parentTemplates", [])],
+                "problems": sorted(probs, key=lambda x: -x["severity"])[:5],
+                "problem_count": len(probs)})
+        return {"hosts": rows}
+
     async def sync(self, devices: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, Any]:
         """Reconcile LM's device list into Zabbix. Also serves as the rebuild:
         a fresh Zabbix repopulates entirely from the inventory."""
