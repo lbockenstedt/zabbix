@@ -22,8 +22,11 @@ export DEBIAN_FRONTEND=noninteractive
 
 if ! dpkg -s zabbix-release >/dev/null 2>&1; then
   . /etc/os-release
-  curl -fsSL -o /tmp/zbx-release.deb \
-    "https://repo.zabbix.com/zabbix/7.0/debian/pool/main/z/zabbix-release/zabbix-release_latest_7.0+debian${VERSION_ID}_all.deb"
+  case "$ID" in debian|ubuntu|raspbian) DIST="$ID" ;; *) DIST=$(echo "$ID_LIKE" | awk '{print $1}') ;; esac
+  case "$DIST" in debian|ubuntu) ;; *) log "unsupported distro: ID=$ID ID_LIKE=$ID_LIKE (need Debian/Ubuntu)"; exit 1 ;; esac
+  URL="https://repo.zabbix.com/zabbix/7.0/${DIST}/pool/main/z/zabbix-release/zabbix-release_latest_7.0+${DIST}${VERSION_ID}_all.deb"
+  log "fetching $URL"
+  curl -fsSL -o /tmp/zbx-release.deb "$URL" || { log "download failed: $URL (no Zabbix 7.0 repo for ${DIST} ${VERSION_ID}, or no internet)"; exit 1; }
   dpkg -i /tmp/zbx-release.deb
 fi
 apt-get update
