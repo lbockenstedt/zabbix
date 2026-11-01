@@ -75,16 +75,13 @@ def parse_iso(value: str) -> Optional[datetime]:
         return None
 
 
-def template_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> str:
-    return cfg["templates"].get(device.get("type") or "", cfg["fallback_template"])
-
-
 def templates_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
-    """ICMP/type template, plus the generic SNMP template once a credential is known."""
-    names = [template_for(device, cfg)]
+    """The type's template, else ICMP Ping, or the generic SNMP template once a
+    credential is known (it already carries the ICMP check, so the two clash)."""
+    mapped = cfg["templates"].get(device.get("type") or "")
     if device.get("snmp"):
-        names.append(cfg["snmp_template"])
-    return names
+        return [mapped or cfg["snmp_template"]]
+    return [mapped or cfg["fallback_template"]]
 
 
 def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]],
@@ -223,14 +220,15 @@ class HostSync:
         if community and cred != host.get("cred"):
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
         want = templates_for(device, self.cfg)
-        if not set(want) <= host["templates"]:
+        if set(want) != host["templates"]:
             params["templates"] = await self._ids("template.get", want, "templateid")
-        if device.get("snmp"):
-            for itf in host.get("interfaces", []):
-                if str(itf.get("type")) == "1":
-                    await self.api.call("hostinterface.update", {
-                        "interfaceid": itf["interfaceid"], "type": 2, "port": "161",
-                        "details": {"version": 2, "bulk": 1, "community": SNMP_MACRO}})
+        # An existing ICMP/agent interface is linked to items and cannot change
+        # type, so the SNMP interface is added next to it.
+        if device.get("snmp") and not any(str(i.get("type")) == "2" for i in host.get("interfaces", [])):
+            await self.api.call("hostinterface.create", {
+                "hostid": host["hostid"], "type": 2, "main": 1, "useip": 1,
+                "ip": device["ip"], "dns": "", "port": "161",
+                "details": {"version": 2, "bulk": 1, "community": SNMP_MACRO}})
         await self.api.call("host.update", params)
 
     async def run(self, devices: List[Dict[str, Any]], now: Optional[datetime] = None,

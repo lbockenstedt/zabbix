@@ -60,11 +60,9 @@ class FakeApi:
                 ids = {x["templateid"] for x in params["templates"]}
                 h["parentTemplates"] = [{"name": n} for n, t in self.templates.items() if t in ids]
             return {"hostids": [params["hostid"]]}
-        if method == "hostinterface.update":
-            for h in self.hosts.values():
-                for i in h["interfaces"]:
-                    if i["interfaceid"] == params["interfaceid"]:
-                        i["type"] = str(params["type"])
+        if method == "hostinterface.create":
+            self.hosts[params["hostid"]]["interfaces"].append(
+                {"interfaceid": self._id(), "type": str(params["type"])})
             return {}
         if method == "host.delete":
             for hid in params:
@@ -100,7 +98,7 @@ def test_unknown_type_uses_fallback_template():
     api = FakeApi()
     run(zs.HostSync(api, CFG).run([dev("OPN1", type_="opnsense")], now=NOW))
     names = {t["name"] for t in next(iter(api.hosts.values()))["parentTemplates"]}
-    assert "ICMP Ping" in names and "Aruba CX by SNMP" not in names
+    assert names == {"Network Generic Device by SNMP"}
 
 
 def test_missing_template_is_reported_not_raised():
@@ -170,7 +168,7 @@ def test_snmp_secret_follows_vault_credential_and_updates_on_change():
     assert tags[zs.TAG_CRED] == zs.cred_fingerprint("two")
 
 
-def test_snmp_credential_found_later_upgrades_icmp_host_to_snmp():
+def test_snmp_credential_found_later_adds_snmp_interface():
     api = FakeApi()
     h = zs.HostSync(api, CFG)
     d = {**dev("sw", type_="x"), "snmp": False}
@@ -179,5 +177,5 @@ def test_snmp_credential_found_later_upgrades_icmp_host_to_snmp():
     assert host["interfaces"][0]["type"] == "1"
     run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
     host = next(iter(api.hosts.values()))
-    assert host["interfaces"][0]["type"] == "2"
-    assert {t["name"] for t in host["parentTemplates"]} == {"ICMP Ping", "Network Generic Device by SNMP"}
+    assert sorted(i["type"] for i in host["interfaces"]) == ["1", "2"]
+    assert {t["name"] for t in host["parentTemplates"]} == {"Network Generic Device by SNMP"}
