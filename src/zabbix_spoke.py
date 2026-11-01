@@ -24,6 +24,12 @@ class ZabbixSpoke(BaseSpoke):
         self.engine = ZabbixEngine(config if isinstance(config, dict) else {})
         super().__init__(spoke_id, config)
 
+    async def get_status(self) -> Dict[str, Any]:
+        try:
+            return {"status": "SUCCESS", **await self.engine.status()}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": str(e)}
+
     @staticmethod
     def _mask(data: Any) -> Any:
         if not isinstance(data, dict):
