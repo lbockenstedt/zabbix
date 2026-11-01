@@ -35,12 +35,12 @@ def test_mask_hides_credentials():
 def test_sync_requires_devices_and_logs_error(caplog):
     spoke = ZabbixSpoke("z1", {})
     with caplog.at_level(logging.ERROR, logger="ZabbixSpoke"):
-        res = run(spoke.handle_command("ZBX_SYNC", {}))
+        res = run(spoke.handle_command("MON_SYNC", {}))
     assert res["status"] == "ERROR" and "error" in caplog.text
 
 
 def test_unconfigured_sync_returns_error_envelope():
-    res = run(ZabbixSpoke("z1", {}).handle_command("ZBX_SYNC", {"devices": []}))
+    res = run(ZabbixSpoke("z1", {}).handle_command("MON_SYNC", {"devices": []}))
     assert res["status"] == "ERROR" and "not configured" in res["message"]
 
 

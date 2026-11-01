@@ -11,7 +11,7 @@
 - `src/zabbix_sync.py` — pure `build_plan()` plus `HostSync` (create / refresh / disable / delete). All age-out rules live here and are unit-tested against an in-memory fake API.
 - `src/zabbix_api.py` — async JSON-RPC client (Zabbix 7.0, bearer API token).
 - `src/zabbix_engine.py` — config, status and sync entry points.
-- `src/zabbix_spoke.py`, `src/control_plane.py` — hub command dispatch (`ZBX_STATUS`, `ZBX_SYNC`, `ZBX_REBUILD`, `UPDATE_CONFIG`).
+- `src/zabbix_spoke.py`, `src/control_plane.py` — hub command dispatch (`MON_STATUS`, `MON_SYNC`, `MON_REBUILD`, `UPDATE_CONFIG`).
 - `install_zabbix.sh` — spoke installer.
 
 ## Rules specific to this repo

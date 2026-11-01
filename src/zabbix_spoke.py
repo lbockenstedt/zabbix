@@ -14,10 +14,10 @@ _SENSITIVE = {"token", "password", "secret", "hub_secret", "snmp_community"}
 
 
 class ZabbixSpoke(BaseSpoke):
-    """Zabbix monitoring spoke. Turns hub ZBX_* commands into Zabbix API work.
+    """Zabbix monitoring spoke. Turns hub MON_* commands into Zabbix API work.
 
     The hub pushes the Zabbix connection and sync settings with UPDATE_CONFIG;
-    the device list arrives with each ZBX_SYNC.
+    the device list arrives with each MON_SYNC.
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
@@ -37,11 +37,11 @@ class ZabbixSpoke(BaseSpoke):
         return {k: ("********" if k in _SENSITIVE else v) for k, v in data.items()}
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Commands: UPDATE_CONFIG, GET_VERSION, ZBX_STATUS,
-        ZBX_SYNC (devices, dry_run), ZBX_REBUILD (devices; full repopulate)."""
+        """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS,
+        MON_SYNC (devices, dry_run), MON_REBUILD (devices; full repopulate)."""
         cmd = (command_type or "").upper()
         logger.info("Handling Zabbix command: %s with data %s", command_type,
-                    self._mask(data) if cmd != "ZBX_SYNC" and cmd != "ZBX_REBUILD"
+                    self._mask(data) if cmd != "MON_SYNC" and cmd != "MON_REBUILD"
                     else {"devices": len((data or {}).get("devices", [])),
                           "dry_run": (data or {}).get("dry_run", False)})
         try:
@@ -72,9 +72,9 @@ class ZabbixSpoke(BaseSpoke):
             return {"status": "SUCCESS", "message": "zabbix configuration updated from Hub"}
         if cmd in ("GET_VERSION", "GET-VERSION"):
             return {"status": "SUCCESS", "version": self.get_version()}
-        if cmd == "ZBX_STATUS":
+        if cmd == "MON_STATUS":
             return {"status": "SUCCESS", **await self.engine.status()}
-        if cmd in ("ZBX_SYNC", "ZBX_REBUILD"):
+        if cmd in ("MON_SYNC", "MON_REBUILD"):
             devices = data.get("devices")
             if not isinstance(devices, list):
                 return {"status": "ERROR", "message": "devices list required"}
