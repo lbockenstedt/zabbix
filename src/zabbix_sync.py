@@ -236,6 +236,24 @@ class HostSync:
                 "ip": device["ip"], "dns": "", "port": "161",
                 "details": {"version": 2, "bulk": 1, "community": SNMP_MACRO}})
         await self.api.call("host.update", params)
+        if snmp_if:  # only once the SNMP interface already existed before this run
+            await self._drop_agent_interface(host, device)
+
+    async def _drop_agent_interface(self, host: Dict[str, Any], device: Dict[str, Any]) -> None:
+        """An SNMP-monitored device must not keep the agent-type (ZBX) interface it
+        was created with before SNMP was verified. Zabbix refuses while items
+        still use it, so a failure is only logged and retried next sync."""
+        if not device.get("snmp"):
+            return
+        if not any(str(i.get("type")) == "2" for i in host.get("interfaces", [])):
+            return
+        for i in host.get("interfaces", []):
+            if str(i.get("type")) == "1":
+                try:
+                    await self.api.call("hostinterface.delete", [i["interfaceid"]])
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("zabbix sync: cannot drop agent interface of %s: %s",
+                                   device.get("key"), e)
 
     async def run(self, devices: List[Dict[str, Any]], now: Optional[datetime] = None,
                   dry_run: bool = False) -> Dict[str, Any]:

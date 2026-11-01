@@ -70,6 +70,10 @@ class FakeApi:
                     if i["interfaceid"] == params["interfaceid"]:
                         i["ip"] = params["ip"]
             return {}
+        if method == "hostinterface.delete":
+            for h in self.hosts.values():
+                h["interfaces"] = [i for i in h["interfaces"] if i["interfaceid"] not in params]
+            return {}
         if method == "host.delete":
             for hid in params:
                 del self.hosts[hid]
@@ -195,3 +199,14 @@ def test_snmp_interface_ip_follows_preferred_address():
     run(h.run([{**d, "ip": "10.0.0.2"}], now=NOW))
     host = next(iter(api.hosts.values()))
     assert [i["ip"] for i in host["interfaces"] if i["type"] == "2"] == ["10.0.0.2"]
+
+
+def test_agent_interface_dropped_once_snmp_interface_exists():
+    api = FakeApi()
+    h = zs.HostSync(api, CFG)
+    d = {**dev("sw", type_="x"), "snmp": False}
+    run(h.run([d], now=NOW))
+    run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
+    run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert [i["type"] for i in host["interfaces"]] == ["2"]
