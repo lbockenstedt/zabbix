@@ -48,7 +48,7 @@ class FakeApi:
                                "macros": params.get("macros", []),
                                "hostgroups": [{"name": gname}],
                                "parentTemplates": [{"name": n} for n in tnames],
-                               "interfaces": [{"interfaceid": hid, "type": str(params["interfaces"][0]["type"])}]}
+                               "interfaces": [{"interfaceid": hid, "type": str(params["interfaces"][0]["type"]), "ip": params["interfaces"][0]["ip"]}]}
             return {"hostids": [hid]}
         if method == "host.update":
             h = self.hosts[params["hostid"]]
@@ -62,7 +62,13 @@ class FakeApi:
             return {"hostids": [params["hostid"]]}
         if method == "hostinterface.create":
             self.hosts[params["hostid"]]["interfaces"].append(
-                {"interfaceid": self._id(), "type": str(params["type"])})
+                {"interfaceid": self._id(), "type": str(params["type"]), "ip": params["ip"]})
+            return {}
+        if method == "hostinterface.update":
+            for h in self.hosts.values():
+                for i in h["interfaces"]:
+                    if i["interfaceid"] == params["interfaceid"]:
+                        i["ip"] = params["ip"]
             return {}
         if method == "host.delete":
             for hid in params:
@@ -179,3 +185,13 @@ def test_snmp_credential_found_later_adds_snmp_interface():
     host = next(iter(api.hosts.values()))
     assert sorted(i["type"] for i in host["interfaces"]) == ["1", "2"]
     assert {t["name"] for t in host["parentTemplates"]} == {"Network Generic Device by SNMP"}
+
+
+def test_snmp_interface_ip_follows_preferred_address():
+    api = FakeApi()
+    h = zs.HostSync(api, CFG)
+    d = {**dev("sw", type_="x"), "snmp": True, "snmp_community": "c", "ip": "10.0.0.1"}
+    run(h.run([d], now=NOW))
+    run(h.run([{**d, "ip": "10.0.0.2"}], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert [i["ip"] for i in host["interfaces"] if i["type"] == "2"] == ["10.0.0.2"]

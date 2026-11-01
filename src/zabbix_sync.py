@@ -141,7 +141,7 @@ class HostSync:
         hosts = await self.api.call("host.get", {
             "output": ["hostid", "status"], "selectTags": "extend",
             "selectHostGroups": ["name"], "selectParentTemplates": ["name"],
-            "selectInterfaces": ["interfaceid", "type"],
+            "selectInterfaces": ["interfaceid", "type", "ip"],
             "tags": [{"tag": TAG_MANAGED, "value": "1", "operator": 1}]})
         existing: Dict[str, Dict[str, Any]] = {}
         for h in hosts:
@@ -224,7 +224,13 @@ class HostSync:
             params["templates"] = await self._ids("template.get", want, "templateid")
         # An existing ICMP/agent interface is linked to items and cannot change
         # type, so the SNMP interface is added next to it.
-        if device.get("snmp") and not any(str(i.get("type")) == "2" for i in host.get("interfaces", [])):
+        snmp_if = [i for i in host.get("interfaces", []) if str(i.get("type")) == "2"]
+        if device.get("snmp") and snmp_if:
+            # The address that answers SNMP may change (e.g. a verified one is preferred).
+            if snmp_if[0].get("ip") and snmp_if[0]["ip"] != device["ip"]:
+                await self.api.call("hostinterface.update", {
+                    "interfaceid": snmp_if[0]["interfaceid"], "ip": device["ip"]})
+        elif device.get("snmp"):
             await self.api.call("hostinterface.create", {
                 "hostid": host["hostid"], "type": 2, "main": 1, "useip": 1,
                 "ip": device["ip"], "dns": "", "port": "161",
