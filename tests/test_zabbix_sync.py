@@ -19,7 +19,7 @@ def run(coro):
 class FakeApi:
     """In-memory Zabbix: just enough of host/hostgroup/template/proxy."""
 
-    def __init__(self, templates=("ICMP Ping", "Aruba CX by SNMP")):
+    def __init__(self, templates=("ICMP Ping", "Aruba CX by SNMP", "Network Generic Device by SNMP")):
         self.templates = {n: str(i) for i, n in enumerate(templates, 1)}
         self.groups, self.hosts, self.calls = {}, {}, []
         self._next = 100
@@ -42,11 +42,13 @@ class FakeApi:
         if method == "host.create":
             hid = self._id()
             gname = next(n for n, g in self.groups.items() if g == params["groups"][0]["groupid"])
-            tname = next(n for n, t in self.templates.items() if t == params["templates"][0]["templateid"])
+            tnames = [n for n, t in self.templates.items()
+                      if t in {x["templateid"] for x in params["templates"]}]
             self.hosts[hid] = {"hostid": hid, "status": "0", "tags": params["tags"],
                                "macros": params.get("macros", []),
                                "hostgroups": [{"name": gname}],
-                               "parentTemplates": [{"name": tname}]}
+                               "parentTemplates": [{"name": n} for n in tnames],
+                               "interfaces": [{"interfaceid": hid, "type": str(params["interfaces"][0]["type"])}]}
             return {"hostids": [hid]}
         if method == "host.update":
             h = self.hosts[params["hostid"]]
@@ -55,9 +57,15 @@ class FakeApi:
             if "macros" in params:
                 h["macros"] = params["macros"]
             if "templates" in params:
-                n = next(n for n, t in self.templates.items() if t == params["templates"][0]["templateid"])
-                h["parentTemplates"] = [{"name": n}]
+                ids = {x["templateid"] for x in params["templates"]}
+                h["parentTemplates"] = [{"name": n} for n, t in self.templates.items() if t in ids]
             return {"hostids": [params["hostid"]]}
+        if method == "hostinterface.update":
+            for h in self.hosts.values():
+                for i in h["interfaces"]:
+                    if i["interfaceid"] == params["interfaceid"]:
+                        i["type"] = str(params["type"])
+            return {}
         if method == "host.delete":
             for hid in params:
                 del self.hosts[hid]
@@ -91,7 +99,8 @@ def test_create_then_refresh_keeps_one_host_and_updates_last_seen():
 def test_unknown_type_uses_fallback_template():
     api = FakeApi()
     run(zs.HostSync(api, CFG).run([dev("OPN1", type_="opnsense")], now=NOW))
-    assert next(iter(api.hosts.values()))["parentTemplates"] == [{"name": "ICMP Ping"}]
+    names = {t["name"] for t in next(iter(api.hosts.values()))["parentTemplates"]}
+    assert "ICMP Ping" in names and "Aruba CX by SNMP" not in names
 
 
 def test_missing_template_is_reported_not_raised():
@@ -159,3 +168,16 @@ def test_snmp_secret_follows_vault_credential_and_updates_on_change():
     assert host["macros"][0]["value"] == "two"
     tags = {t["tag"]: t["value"] for t in host["tags"]}
     assert tags[zs.TAG_CRED] == zs.cred_fingerprint("two")
+
+
+def test_snmp_credential_found_later_upgrades_icmp_host_to_snmp():
+    api = FakeApi()
+    h = zs.HostSync(api, CFG)
+    d = {**dev("sw", type_="x"), "snmp": False}
+    run(h.run([d], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert host["interfaces"][0]["type"] == "1"
+    run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert host["interfaces"][0]["type"] == "2"
+    assert {t["name"] for t in host["parentTemplates"]} == {"ICMP Ping", "Network Generic Device by SNMP"}

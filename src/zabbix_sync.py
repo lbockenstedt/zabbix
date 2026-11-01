@@ -33,6 +33,7 @@ DEFAULTS = {
     "max_age_out_pct": 5,
     "min_fleet": 3,
     "fallback_template": "ICMP Ping",
+    "snmp_template": "Network Generic Device by SNMP",
     "templates": {},
 }
 
@@ -76,6 +77,14 @@ def parse_iso(value: str) -> Optional[datetime]:
 
 def template_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> str:
     return cfg["templates"].get(device.get("type") or "", cfg["fallback_template"])
+
+
+def templates_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
+    """ICMP/type template, plus the generic SNMP template once a credential is known."""
+    names = [template_for(device, cfg)]
+    if device.get("snmp"):
+        names.append(cfg["snmp_template"])
+    return names
 
 
 def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]],
@@ -135,6 +144,7 @@ class HostSync:
         hosts = await self.api.call("host.get", {
             "output": ["hostid", "status"], "selectTags": "extend",
             "selectHostGroups": ["name"], "selectParentTemplates": ["name"],
+            "selectInterfaces": ["interfaceid", "type"],
             "tags": [{"tag": TAG_MANAGED, "value": "1", "operator": 1}]})
         existing: Dict[str, Dict[str, Any]] = {}
         for h in hosts:
@@ -150,6 +160,7 @@ class HostSync:
                 "cred": tags.get(TAG_CRED, ""),
                 "tenant": groups[0].split("/", 1)[-1] if groups else "default",
                 "templates": {t["name"] for t in h.get("parentTemplates", [])},
+                "interfaces": h.get("interfaces", []),
             }
         return existing
 
@@ -176,12 +187,12 @@ class HostSync:
         return tags
 
     async def _create(self, device: Dict[str, Any], now: datetime) -> None:
-        template = template_for(device, self.cfg)
+        wanted = templates_for(device, self.cfg)
         community = device.get("snmp_community") or ""
         cred = cred_fingerprint(community)
-        templates = await self._ids("template.get", [template], "templateid")
-        if not templates:
-            raise RuntimeError(f"template '{template}' not found in Zabbix")
+        templates = await self._ids("template.get", wanted, "templateid")
+        if len(templates) < len(set(wanted)):
+            raise RuntimeError(f"template(s) {wanted} not all found in Zabbix")
         interface = {"type": 2 if device.get("snmp") else 1, "main": 1, "useip": 1,
                      "ip": device["ip"], "dns": "",
                      "port": "161" if device.get("snmp") else "10050"}
@@ -211,9 +222,15 @@ class HostSync:
         # the credential that worked for this device changes.
         if community and cred != host.get("cred"):
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
-        want = template_for(device, self.cfg)
-        if want not in host["templates"]:
-            params["templates"] = await self._ids("template.get", [want], "templateid")
+        want = templates_for(device, self.cfg)
+        if not set(want) <= host["templates"]:
+            params["templates"] = await self._ids("template.get", want, "templateid")
+        if device.get("snmp"):
+            for itf in host.get("interfaces", []):
+                if str(itf.get("type")) == "1":
+                    await self.api.call("hostinterface.update", {
+                        "interfaceid": itf["interfaceid"], "type": 2, "port": "161",
+                        "details": {"version": 2, "bulk": 1, "community": SNMP_MACRO}})
         await self.api.call("host.update", params)
 
     async def run(self, devices: List[Dict[str, Any]], now: Optional[datetime] = None,
