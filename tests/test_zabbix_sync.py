@@ -44,6 +44,7 @@ class FakeApi:
             gname = next(n for n, g in self.groups.items() if g == params["groups"][0]["groupid"])
             tname = next(n for n, t in self.templates.items() if t == params["templates"][0]["templateid"])
             self.hosts[hid] = {"hostid": hid, "status": "0", "tags": params["tags"],
+                               "macros": params.get("macros", []),
                                "hostgroups": [{"name": gname}],
                                "parentTemplates": [{"name": tname}]}
             return {"hostids": [hid]}
@@ -51,6 +52,8 @@ class FakeApi:
             h = self.hosts[params["hostid"]]
             h["status"] = str(params["status"])
             h["tags"] = params["tags"]
+            if "macros" in params:
+                h["macros"] = params["macros"]
             if "templates" in params:
                 n = next(n for n, t in self.templates.items() if t == params["templates"][0]["templateid"])
                 h["parentTemplates"] = [{"name": n}]
@@ -142,3 +145,17 @@ def test_dry_run_changes_nothing():
     api = FakeApi()
     r = run(zs.HostSync(api, CFG).run([dev("CRSW1")], now=NOW, dry_run=True))
     assert r["planned"]["create"] == 1 and not api.hosts
+
+
+def test_snmp_secret_follows_vault_credential_and_updates_on_change():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([{**dev("CRSW1"), "snmp_community": "one"}], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert host["macros"] == [{"macro": "{$SNMP_COMMUNITY}", "value": "one", "type": 1}]
+    run(sync.run([{**dev("CRSW1"), "snmp_community": "one"}], now=NOW + timedelta(days=1)))
+    assert host["macros"][0]["value"] == "one"
+    run(sync.run([{**dev("CRSW1"), "snmp_community": "two"}], now=NOW + timedelta(days=2)))
+    assert host["macros"][0]["value"] == "two"
+    tags = {t["tag"]: t["value"] for t in host["tags"]}
+    assert tags[zs.TAG_CRED] == zs.cred_fingerprint("two")

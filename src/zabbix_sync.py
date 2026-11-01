@@ -13,6 +13,7 @@ Two guards stop a source outage from wiping the fleet:
   hosts in one run -> hold that tenant and report it.
 """
 import logging
+import hashlib
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,8 @@ TAG_MANAGED = "lm-managed"
 TAG_KEY = "lm-key"
 TAG_LAST_SEEN = "lm-last-seen"
 TAG_DISABLED_AT = "lm-disabled-at"
+TAG_CRED = "lm-cred"  # fingerprint of the SNMP secret last applied (the secret itself is unreadable)
+SNMP_MACRO = "{$SNMP_COMMUNITY}"
 
 DEFAULTS = {
     "stale_days": 7,
@@ -49,6 +52,10 @@ def dedupe_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         seen[key] = {**d, "key": key, "tenant": d.get("tenant") or "default"}
     return list(seen.values())
+
+
+def cred_fingerprint(secret: Optional[str]) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()[:12] if secret else ""
 
 
 def host_name(key: str) -> str:
@@ -140,6 +147,7 @@ class HostSync:
                 "hostid": h["hostid"], "status": int(h["status"]),
                 "last_seen": parse_iso(tags.get(TAG_LAST_SEEN)),
                 "disabled_at": parse_iso(tags.get(TAG_DISABLED_AT)),
+                "cred": tags.get(TAG_CRED, ""),
                 "tenant": groups[0].split("/", 1)[-1] if groups else "default",
                 "templates": {t["name"] for t in h.get("parentTemplates", [])},
             }
@@ -157,15 +165,20 @@ class HostSync:
         created = await self.api.call("hostgroup.create", {"name": name})
         return created["groupids"][0]
 
-    def _tags(self, key: str, now: datetime, disabled_at: Optional[datetime] = None):
+    def _tags(self, key: str, now: datetime, disabled_at: Optional[datetime] = None,
+              cred: str = ""):
         tags = [{"tag": TAG_MANAGED, "value": "1"}, {"tag": TAG_KEY, "value": key},
                 {"tag": TAG_LAST_SEEN, "value": to_iso(now)}]
+        if cred:
+            tags.append({"tag": TAG_CRED, "value": cred})
         if disabled_at:
             tags.append({"tag": TAG_DISABLED_AT, "value": to_iso(disabled_at)})
         return tags
 
     async def _create(self, device: Dict[str, Any], now: datetime) -> None:
         template = template_for(device, self.cfg)
+        community = device.get("snmp_community") or ""
+        cred = cred_fingerprint(community)
         templates = await self._ids("template.get", [template], "templateid")
         if not templates:
             raise RuntimeError(f"template '{template}' not found in Zabbix")
@@ -173,11 +186,14 @@ class HostSync:
                      "ip": device["ip"], "dns": "",
                      "port": "161" if device.get("snmp") else "10050"}
         if device.get("snmp"):
-            interface["details"] = {"version": 2, "bulk": 1, "community": "{$SNMP_COMMUNITY}"}
+            interface["details"] = {"version": 2, "bulk": 1, "community": SNMP_MACRO}
         params = {"host": host_name(device["key"]), "name": device["name"],
                   "interfaces": [interface],
                   "groups": [{"groupid": await self._group_id(device["tenant"])}],
-                  "templates": templates, "tags": self._tags(device["key"], now)}
+                  "templates": templates,
+                  "tags": self._tags(device["key"], now, cred=cred)}
+        if community:
+            params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
         proxy = self.cfg.get("tenant_proxies", {}).get(device["tenant"])
         if proxy:
             found = await self.api.call("proxy.get", {"output": ["proxyid"],
@@ -187,8 +203,14 @@ class HostSync:
         await self.api.call("host.create", params)
 
     async def _refresh(self, host: Dict[str, Any], device: Dict[str, Any], now: datetime) -> None:
+        community = device.get("snmp_community") or ""
+        cred = cred_fingerprint(community) or host.get("cred", "")
         params: Dict[str, Any] = {"hostid": host["hostid"], "status": 0,
-                                  "tags": self._tags(device["key"], now)}
+                                  "tags": self._tags(device["key"], now, cred=cred)}
+        # LM's credential vault is the source of truth: push the secret whenever
+        # the credential that worked for this device changes.
+        if community and cred != host.get("cred"):
+            params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
         want = template_for(device, self.cfg)
         if want not in host["templates"]:
             params["templates"] = await self._ids("template.get", [want], "templateid")
@@ -223,7 +245,8 @@ class HostSync:
         for h in plan["disable"]:
             await attempt("disabled", f"disable {h['key']}", self.api.call("host.update", {
                 "hostid": h["hostid"], "status": 1,
-                "tags": self._tags(h["key"], h["last_seen"], disabled_at=now)}))
+                "tags": self._tags(h["key"], h["last_seen"], disabled_at=now,
+                                   cred=h.get("cred", ""))}))
         for h in plan["delete"]:
             await attempt("deleted", f"delete {h['key']}", self.api.call("host.delete", [h["hostid"]]))
         logger.info("zabbix sync done: %s", {k: summary[k] for k in
