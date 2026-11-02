@@ -79,7 +79,7 @@ class ZabbixEngine:
                 "availability": avail, "error": (iface.get("error") or "")[:160],
                 "enabled": str(h["status"]) == "0",
                 "templates": [t["name"] for t in h.get("parentTemplates", [])],
-                "problems": sorted(probs, key=lambda x: -x["severity"])[:5],
+                "problems": sorted(probs, key=lambda x: -x["severity"])[:100],
                 "problem_count": len(probs)})
         return {"hosts": rows}
 
