@@ -227,13 +227,15 @@ class HostSync:
 
     async def _refresh(self, host: Dict[str, Any], device: Dict[str, Any], now: datetime) -> None:
         community = device.get("snmp_community") or ""
-        cred = cred_fingerprint(community) or host.get("cred", "")
+        cred = cred_fingerprint(community)  # no credential for this tenant: no label
         params: Dict[str, Any] = {"hostid": host["hostid"], "status": 0,
                                   "tags": self._tags(device["key"], now, cred=cred)}
         # LM's credential vault is the source of truth: push the secret whenever
         # the credential that worked for this device changes.
         if community and cred != host.get("cred"):
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
+        elif not community and host.get("cred"):
+            params["macros"] = []  # drop a secret that no longer belongs to this device
         proxyid = await self._proxy_id(host.get("tenant") or device.get("tenant") or "default")
         if proxyid and host.get("proxyid") != proxyid:
             params.update({"monitored_by": 1, "proxyid": proxyid})
