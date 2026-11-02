@@ -21,7 +21,7 @@ class FakeApi:
 
     def __init__(self, templates=("ICMP Ping", "Aruba CX by SNMP", "Network Generic Device by SNMP")):
         self.templates = {n: str(i) for i, n in enumerate(templates, 1)}
-        self.groups, self.hosts, self.calls = {}, {}, []
+        self.groups, self.hosts, self.calls, self.proxies = {}, {}, [], {}
         self._next = 100
 
     def _id(self):
@@ -39,6 +39,9 @@ class FakeApi:
         if method == "hostgroup.create":
             self.groups[params["name"]] = gid = self._id()
             return {"groupids": [gid]}
+        if method == "proxy.get":
+            return [{"proxyid": self.proxies[n], "name": n}
+                    for n in params["filter"]["name"] if n in self.proxies]
         if method == "host.create":
             hid = self._id()
             gname = next(n for n, g in self.groups.items() if g == params["groups"][0]["groupid"])
@@ -46,6 +49,8 @@ class FakeApi:
                       if t in {x["templateid"] for x in params["templates"]}]
             self.hosts[hid] = {"hostid": hid, "status": "0", "tags": params["tags"],
                                "macros": params.get("macros", []),
+                               "monitored_by": str(params.get("monitored_by", 0)),
+                               "proxyid": str(params.get("proxyid", 0)),
                                "hostgroups": [{"name": gname}],
                                "parentTemplates": [{"name": n} for n in tnames],
                                "interfaces": [{"interfaceid": hid, "type": str(params["interfaces"][0]["type"]), "ip": params["interfaces"][0]["ip"]}]}
@@ -56,6 +61,8 @@ class FakeApi:
             h["tags"] = params["tags"]
             if "macros" in params:
                 h["macros"] = params["macros"]
+            if "proxyid" in params:
+                h["monitored_by"], h["proxyid"] = str(params["monitored_by"]), str(params["proxyid"])
             if "templates" in params:
                 ids = {x["templateid"] for x in params["templates"]}
                 h["parentTemplates"] = [{"name": n} for n, t in self.templates.items() if t in ids]
@@ -102,6 +109,20 @@ def test_create_then_refresh_keeps_one_host_and_updates_last_seen():
     tags = {t["tag"]: t["value"] for t in next(iter(api.hosts.values()))["tags"]}
     assert tags[zs.TAG_LAST_SEEN] == "2026-11-02T00:00:00Z"
     assert "LM/lrb" in api.groups
+
+
+def test_tenant_hosts_follow_the_registered_tenant_proxy():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("CRSW1")], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert host["monitored_by"] == "0"  # no proxy registered yet: polled by the server
+    api.proxies[zs.proxy_name_for("lrb")] = "77"
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("CRSW1")], now=NOW + timedelta(days=1)))
+    assert (host["monitored_by"], host["proxyid"]) == ("1", "77")
+    run(sync.run([dev("TOR1", ip="10.0.0.2")], now=NOW + timedelta(days=1)))
+    assert {h["proxyid"] for h in api.hosts.values()} == {"77"}
 
 
 def test_unknown_type_uses_fallback_template():

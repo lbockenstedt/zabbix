@@ -55,6 +55,11 @@ def dedupe_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(seen.values())
 
 
+def proxy_name_for(tenant: str) -> str:
+    """Convention shared with the hub's proxy installer: ``lm-<tenant>``."""
+    return "lm-" + re.sub(r"[^A-Za-z0-9._-]+", "-", str(tenant or "default"))
+
+
 def cred_fingerprint(secret: Optional[str]) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()[:12] if secret else ""
 
@@ -139,7 +144,7 @@ class HostSync:
 
     async def load_existing(self) -> Dict[str, Dict[str, Any]]:
         hosts = await self.api.call("host.get", {
-            "output": ["hostid", "status"], "selectTags": "extend",
+            "output": ["hostid", "status", "monitored_by", "proxyid"], "selectTags": "extend",
             "selectHostGroups": ["name"], "selectParentTemplates": ["name"],
             "selectInterfaces": ["interfaceid", "type", "ip"],
             "tags": [{"tag": TAG_MANAGED, "value": "1", "operator": 1}]})
@@ -158,8 +163,21 @@ class HostSync:
                 "tenant": groups[0].split("/", 1)[-1] if groups else "default",
                 "templates": {t["name"] for t in h.get("parentTemplates", [])},
                 "interfaces": h.get("interfaces", []),
+                "proxyid": h.get("proxyid", "0") if str(h.get("monitored_by")) == "1" else "0",
             }
         return existing
+
+    async def _proxy_id(self, tenant: str) -> Optional[str]:
+        """The tenant's proxy, if it is registered in Zabbix: an explicit
+        ``tenant_proxies`` entry, else the ``lm-<tenant>`` name the hub gives
+        proxies it installs. A tenant without one is polled by the server."""
+        cache = self.__dict__.setdefault("_proxy_cache", {})
+        if tenant not in cache:
+            name = (self.cfg.get("tenant_proxies") or {}).get(tenant) or proxy_name_for(tenant)
+            found = await self.api.call("proxy.get", {"output": ["proxyid"],
+                                                      "filter": {"name": [name]}})
+            cache[tenant] = found[0]["proxyid"] if found else None
+        return cache[tenant]
 
     async def _ids(self, method: str, names: List[str], key: str) -> List[Dict[str, str]]:
         found = await self.api.call(method, {"output": [key, "name"], "filter": {"name": names}})
@@ -202,12 +220,9 @@ class HostSync:
                   "tags": self._tags(device["key"], now, cred=cred)}
         if community:
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
-        proxy = self.cfg.get("tenant_proxies", {}).get(device["tenant"])
-        if proxy:
-            found = await self.api.call("proxy.get", {"output": ["proxyid"],
-                                                      "filter": {"name": [proxy]}})
-            if found:
-                params.update({"monitored_by": 1, "proxyid": found[0]["proxyid"]})
+        proxyid = await self._proxy_id(device["tenant"])
+        if proxyid:
+            params.update({"monitored_by": 1, "proxyid": proxyid})
         await self.api.call("host.create", params)
 
     async def _refresh(self, host: Dict[str, Any], device: Dict[str, Any], now: datetime) -> None:
@@ -219,6 +234,11 @@ class HostSync:
         # the credential that worked for this device changes.
         if community and cred != host.get("cred"):
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
+        proxyid = await self._proxy_id(host.get("tenant") or device.get("tenant") or "default")
+        if proxyid and host.get("proxyid") != proxyid:
+            params.update({"monitored_by": 1, "proxyid": proxyid})
+        elif not proxyid and host.get("proxyid", "0") != "0":
+            params.update({"monitored_by": 0, "proxyid": 0})
         want = templates_for(device, self.cfg)
         if set(want) != host["templates"]:
             params["templates"] = await self._ids("template.get", want, "templateid")

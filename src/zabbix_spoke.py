@@ -76,6 +76,11 @@ class ZabbixSpoke(BaseSpoke):
             return {"status": "SUCCESS", **await self.engine.status()}
         if cmd == "MON_HOSTS":
             return {"status": "SUCCESS", **await self.engine.hosts()}
+        if cmd == "MON_PROXY_REGISTER":
+            name = str(data.get("name") or "").strip()
+            if not name:
+                return {"status": "ERROR", "message": "name required"}
+            return {"status": "SUCCESS", **await self.engine.register_proxy(name)}
         if cmd in ("MON_SYNC", "MON_REBUILD"):
             devices = data.get("devices")
             if not isinstance(devices, list):

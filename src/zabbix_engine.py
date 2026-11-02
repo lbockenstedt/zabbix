@@ -83,6 +83,16 @@ class ZabbixEngine:
                 "problem_count": len(probs)})
         return {"hosts": rows}
 
+    async def register_proxy(self, name: str) -> Dict[str, Any]:
+        """Create the (active-mode) proxy a freshly installed zbxproxy reports as;
+        Zabbix ignores a proxy it has no record of. Idempotent."""
+        api = self._client()
+        found = await api.call("proxy.get", {"output": ["proxyid"], "filter": {"name": [name]}})
+        if found:
+            return {"proxy": name, "proxyid": found[0]["proxyid"], "created": False}
+        res = await api.call("proxy.create", {"name": name, "operating_mode": 0})
+        return {"proxy": name, "proxyid": res["proxyids"][0], "created": True}
+
     async def sync(self, devices: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, Any]:
         """Reconcile LM's device list into Zabbix. Also serves as the rebuild:
         a fresh Zabbix repopulates entirely from the inventory."""
