@@ -246,6 +246,9 @@ class AgentApi:
             return [{"templateid": "9", "name": params["filter"]["name"][0]}]
         if method == "proxy.get":
             return [{"proxyid": "5", "name": params["filter"]["name"][0]}]
+        if method == "host.update":
+            self.updated = params
+            return {}
         if method == "host.create":
             self.created.append(params)
             return {"hostids": ["1"]}
@@ -263,3 +266,13 @@ def test_register_agent_host_unmanaged_and_proxied():
     assert first["created"] and not again["created"] and len(api.created) == 1
     assert p["host"] == "lrb--pxmx-01" and p["proxyid"] == "5" and p["monitored_by"] == 1
     assert all(t["tag"] != "lm-managed" for t in p["tags"])
+
+
+def test_register_agent_host_requires_cert_subject():
+    from zabbix_engine import ZabbixEngine
+    eng = ZabbixEngine({})
+    api = AgentApi()
+    eng._client = lambda: api
+    asyncio.run(eng.register_agent_host("lrb", "pxmx-02", "lrb--pxmx-02"))
+    p = api.created[0]
+    assert p["tls_connect"] == 4 and p["tls_accept"] == 4 and p["tls_subject"] == "CN=lrb--pxmx-02"

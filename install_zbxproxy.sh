@@ -44,6 +44,8 @@ setkey DBName /var/lib/zabbix/zabbix_proxy.db
 if [ -n "$TLS_CERT" ]; then
   setkey TLSConnect cert; setkey TLSAccept cert
   setkey TLSCAFile "$TLS_CA"; setkey TLSCertFile "$TLS_CERT"; setkey TLSKeyFile "$TLS_KEY"
+  chgrp zabbix "$TLS_CA" "$TLS_CERT" "$TLS_KEY"; chmod 640 "$TLS_KEY"
+  # The packaged agent on this host talks to the local proxy over loopback, so leave it unencrypted.
 fi
 chown root:zabbix "$CONF"; chmod 640 "$CONF"
 mkdir -p /var/lib/zabbix && chown zabbix:zabbix /var/lib/zabbix

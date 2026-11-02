@@ -4,7 +4,7 @@
 # (scratch/lab); with --db-host the external database (Azure Flexible Server) is used.
 set -e
 DB_HOST=""; DB_PORT=5432; DB_NAME=zabbix; DB_USER=zabbix; DB_PASS=""; SERVER_NAME="_"
-ADMIN_USER=""; ADMIN_PASS=""; TIMESCALE=0; SELF_SIGNED=0
+ADMIN_USER=""; ADMIN_PASS=""; TIMESCALE=0; SELF_SIGNED=0; TLS_CA=""; TLS_CERT=""; TLS_KEY=""
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --infra-only|--all-prereqs) ;;
@@ -17,6 +17,9 @@ while [[ "$#" -gt 0 ]]; do
     --admin-user) ADMIN_USER="$2"; shift ;;   # external DB admin: creates the role/db/extension
     --admin-pass) ADMIN_PASS="$2"; shift ;;
     --timescale) TIMESCALE=1 ;;
+    --tls-ca) TLS_CA="$2"; shift ;;           # hub-CA mTLS for proxies connecting in
+    --tls-cert) TLS_CERT="$2"; shift ;;
+    --tls-key) TLS_KEY="$2"; shift ;;
     --self-signed) SELF_SIGNED=1 ;;           # HTTPS on 443 with a self-signed cert (until LE)
     *) echo "Unknown parameter: $1"; exit 1 ;;
   esac
@@ -100,6 +103,12 @@ sed -i -e "s|^#\? *DBHost=.*|DBHost=$DB_HOST|" -e "s|^#\? *DBName=.*|DBName=$DB_
        -e "s|^#\? *DBUser=.*|DBUser=$DB_USER|" -e "s|^#\? *DBPassword=.*|DBPassword=$DB_PASS|" \
        -e "s|^#\? *DBPort=.*|DBPort=$DB_PORT|" "$CONF"
 chmod 640 "$CONF"
+if [ -n "$TLS_CERT" ]; then
+  for kv in "TLSCAFile=$TLS_CA" "TLSCertFile=$TLS_CERT" "TLSKeyFile=$TLS_KEY"; do
+    k=${kv%%=*}; grep -q "^$k=" "$CONF" && sed -i "s|^$k=.*|$kv|" "$CONF" || echo "$kv" >> "$CONF"
+  done
+  chgrp zabbix "$TLS_CA" "$TLS_CERT" "$TLS_KEY"; chmod 640 "$TLS_KEY"
+fi
 
 # Pre-seed the web frontend config so the setup wizard is skipped.
 mkdir -p /etc/zabbix/web

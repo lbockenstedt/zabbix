@@ -85,25 +85,33 @@ class ZabbixEngine:
                 "problem_count": len(probs)})
         return {"hosts": rows}
 
-    async def register_proxy(self, name: str) -> Dict[str, Any]:
+    async def register_proxy(self, name: str, tls_subject: str = "") -> Dict[str, Any]:
         """Create the (active-mode) proxy a freshly installed zbxproxy reports as;
         Zabbix ignores a proxy it has no record of. Idempotent."""
         api = self._client()
+        tls = {"tls_accept": 4, "tls_subject": f"CN={tls_subject}"} if tls_subject else {}
         found = await api.call("proxy.get", {"output": ["proxyid"], "filter": {"name": [name]}})
         if found:
+            if tls:
+                await api.call("proxy.update", {"proxyid": found[0]["proxyid"], **tls})
             return {"proxy": name, "proxyid": found[0]["proxyid"], "created": False}
-        res = await api.call("proxy.create", {"name": name, "operating_mode": 0})
+        res = await api.call("proxy.create", {"name": name, "operating_mode": 0, **tls})
         return {"proxy": name, "proxyid": res["proxyids"][0], "created": True}
 
-    async def register_agent_host(self, tenant: str, hostname: str) -> Dict[str, Any]:
+    async def register_agent_host(self, tenant: str, hostname: str, tls_subject: str = "") -> Dict[str, Any]:
         """Host record for an active zabbix-agent2 that reports to the tenant's proxy.
         Not tagged lm-managed, so the inventory sync never reaps it. Idempotent."""
         sync = HostSync(self._client(), self.config)
         name = host_name(f"{tenant}/{hostname}")
         api = sync.api
-        if await api.call("host.get", {"output": ["hostid"], "filter": {"host": [name]}}):
+        tls = ({"tls_connect": 4, "tls_accept": 4, "tls_subject": f"CN={tls_subject}"}
+               if tls_subject else {})
+        existing = await api.call("host.get", {"output": ["hostid"], "filter": {"host": [name]}})
+        if existing:
+            if tls:
+                await api.call("host.update", {"hostid": existing[0]["hostid"], **tls})
             return {"host": name, "created": False}
-        params = {"host": name, "name": hostname,
+        params = {"host": name, "name": hostname, **tls,
                   "groups": [{"groupid": await sync._group_id(tenant)}],
                   "tags": [{"tag": "lm-agent", "value": "1"}]}
         templates = await sync._ids("template.get", [AGENT_TEMPLATE], "templateid")
