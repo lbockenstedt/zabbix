@@ -3,7 +3,9 @@ import logging
 from typing import Any, Dict, List
 
 from zabbix_api import ZabbixApi
-from zabbix_sync import HostSync
+from zabbix_sync import HostSync, host_name
+
+AGENT_TEMPLATE = "Linux by Zabbix agent active"
 
 logger = logging.getLogger("ZabbixEngine")
 
@@ -92,6 +94,27 @@ class ZabbixEngine:
             return {"proxy": name, "proxyid": found[0]["proxyid"], "created": False}
         res = await api.call("proxy.create", {"name": name, "operating_mode": 0})
         return {"proxy": name, "proxyid": res["proxyids"][0], "created": True}
+
+    async def register_agent_host(self, tenant: str, hostname: str) -> Dict[str, Any]:
+        """Host record for an active zabbix-agent2 that reports to the tenant's proxy.
+        Not tagged lm-managed, so the inventory sync never reaps it. Idempotent."""
+        sync = HostSync(self._client(), self.config)
+        name = host_name(f"{tenant}/{hostname}")
+        api = sync.api
+        if await api.call("host.get", {"output": ["hostid"], "filter": {"host": [name]}}):
+            return {"host": name, "created": False}
+        params = {"host": name, "name": hostname,
+                  "groups": [{"groupid": await sync._group_id(tenant)}],
+                  "tags": [{"tag": "lm-agent", "value": "1"}]}
+        templates = await sync._ids("template.get", [AGENT_TEMPLATE], "templateid")
+        if templates:
+            params["templates"] = templates
+        proxyid = await sync._proxy_id(tenant)
+        if proxyid:
+            params.update({"monitored_by": 1, "proxyid": proxyid})
+        await api.call("host.create", params)
+        return {"host": name, "created": True, "proxied": bool(proxyid),
+                "templated": bool(templates)}
 
     async def sync(self, devices: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, Any]:
         """Reconcile LM's device list into Zabbix. Also serves as the rebuild:

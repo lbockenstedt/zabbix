@@ -231,3 +231,35 @@ def test_agent_interface_dropped_once_snmp_interface_exists():
     run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
     host = next(iter(api.hosts.values()))
     assert [i["type"] for i in host["interfaces"]] == ["2"]
+
+
+class AgentApi:
+    def __init__(self):
+        self.created = []
+
+    async def call(self, method, params=None):
+        if method == "host.get":
+            return [{"hostid": "1"}] if any(c["host"] in params["filter"]["host"] for c in self.created) else []
+        if method == "hostgroup.get":
+            return [{"groupid": "7", "name": "LM/lrb"}]
+        if method == "template.get":
+            return [{"templateid": "9", "name": params["filter"]["name"][0]}]
+        if method == "proxy.get":
+            return [{"proxyid": "5", "name": params["filter"]["name"][0]}]
+        if method == "host.create":
+            self.created.append(params)
+            return {"hostids": ["1"]}
+        raise AssertionError(method)
+
+
+def test_register_agent_host_unmanaged_and_proxied():
+    from zabbix_engine import ZabbixEngine
+    eng = ZabbixEngine({})
+    eng._client = lambda: api
+    api = AgentApi()
+    first = asyncio.run(eng.register_agent_host("lrb", "pxmx-01"))
+    again = asyncio.run(eng.register_agent_host("lrb", "pxmx-01"))
+    p = api.created[0]
+    assert first["created"] and not again["created"] and len(api.created) == 1
+    assert p["host"] == "lrb--pxmx-01" and p["proxyid"] == "5" and p["monitored_by"] == 1
+    assert all(t["tag"] != "lm-managed" for t in p["tags"])

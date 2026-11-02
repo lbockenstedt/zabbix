@@ -81,6 +81,12 @@ class ZabbixSpoke(BaseSpoke):
             if not name:
                 return {"status": "ERROR", "message": "name required"}
             return {"status": "SUCCESS", **await self.engine.register_proxy(name)}
+        if cmd == "MON_AGENT_REGISTER":
+            tenant = str(data.get("tenant") or "").strip()
+            hostname = str(data.get("hostname") or "").strip()
+            if not (tenant and hostname):
+                return {"status": "ERROR", "message": "tenant and hostname required"}
+            return {"status": "SUCCESS", **await self.engine.register_agent_host(tenant, hostname)}
         if cmd in ("MON_SYNC", "MON_REBUILD"):
             devices = data.get("devices")
             if not isinstance(devices, list):
