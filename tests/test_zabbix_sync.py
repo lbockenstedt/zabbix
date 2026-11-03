@@ -132,6 +132,15 @@ def test_unknown_type_uses_fallback_template():
     assert names == {"Network Generic Device by SNMP"}
 
 
+def test_typed_device_without_snmp_gets_icmp_only():
+    # Zabbix refuses an SNMP type template on a host with no SNMP interface.
+    api = FakeApi()
+    run(zs.HostSync(api, CFG).run([{**dev("CRSW1"), "snmp": False}], now=NOW))
+    host = next(iter(api.hosts.values()))
+    assert {t["name"] for t in host["parentTemplates"]} == {"ICMP Ping"}
+    assert host["interfaces"][0]["type"] == "1"
+
+
 def test_missing_template_is_reported_not_raised():
     api = FakeApi(templates=("ICMP Ping",))
     result = run(zs.HostSync(api, CFG).run([dev("CRSW1")], now=NOW))
