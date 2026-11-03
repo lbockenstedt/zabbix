@@ -81,12 +81,13 @@ def parse_iso(value: str) -> Optional[datetime]:
 
 
 def templates_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
-    """The type's template, else ICMP Ping, or the generic SNMP template once a
-    credential is known (it already carries the ICMP check, so the two clash)."""
-    mapped = cfg["templates"].get(device.get("type") or "")
+    """Once an SNMP credential is known: the type's template, else the generic
+    SNMP template (it already carries the ICMP check, so the two clash).
+    Without one: ICMP Ping only — type templates poll over SNMP and Zabbix
+    refuses to link them to a host that has no SNMP interface."""
     if device.get("snmp"):
-        return [mapped or cfg["snmp_template"]]
-    return [mapped or cfg["fallback_template"]]
+        return [cfg["templates"].get(device.get("type") or "") or cfg["snmp_template"]]
+    return [cfg["fallback_template"]]
 
 
 def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]],
