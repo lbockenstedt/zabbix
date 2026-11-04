@@ -99,8 +99,18 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
     purge = timedelta(days=cfg["delete_days"])
     seen_keys = {d["key"] for d in devices}
 
-    create = [d for d in devices if d["key"] not in existing]
-    refresh = [(existing[d["key"]], d) for d in devices if d["key"] in existing]
+    create, refresh = [], [(existing[d["key"]], d) for d in devices if d["key"] in existing]
+    for d in devices:
+        if d["key"] in existing:
+            continue
+        # LM moved the device to another tenant: re-key its existing host
+        # (name, group, proxy) instead of creating a duplicate beside it.
+        old = device_key(d.get("moved_from") or "", d.get("name") or "") if d.get("moved_from") else ""
+        if old and old in existing and old not in seen_keys:
+            refresh.append((existing[old], d))
+            seen_keys.add(old)
+        else:
+            create.append(d)
 
     disable: List[Dict[str, Any]] = []
     delete: List[Dict[str, Any]] = []
@@ -157,7 +167,7 @@ class HostSync:
                 continue
             groups = [g["name"] for g in h.get("hostgroups", [])]
             existing[key] = {
-                "hostid": h["hostid"], "status": int(h["status"]),
+                "key": key, "hostid": h["hostid"], "status": int(h["status"]),
                 "last_seen": parse_iso(tags.get(TAG_LAST_SEEN)),
                 "disabled_at": parse_iso(tags.get(TAG_DISABLED_AT)),
                 "cred": tags.get(TAG_CRED, ""),
@@ -179,6 +189,15 @@ class HostSync:
                                                       "filter": {"name": [name]}})
             cache[tenant] = found[0]["proxyid"] if found else None
         return cache[tenant]
+
+    async def _device_proxy_id(self, device: Dict[str, Any]) -> Optional[str]:
+        """The device tenant's proxy, else the first registered proxy of the
+        tenants the hub lists in ``proxy_tenants`` (a tenant group's members)."""
+        for tenant in [device.get("tenant") or "default", *(device.get("proxy_tenants") or [])]:
+            proxyid = await self._proxy_id(tenant)
+            if proxyid:
+                return proxyid
+        return None
 
     async def _ids(self, method: str, names: List[str], key: str) -> List[Dict[str, str]]:
         found = await self.api.call(method, {"output": [key, "name"], "filter": {"name": names}})
@@ -221,7 +240,7 @@ class HostSync:
                   "tags": self._tags(device["key"], now, cred=cred)}
         if community:
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
-        proxyid = await self._proxy_id(device["tenant"])
+        proxyid = await self._device_proxy_id(device)
         if proxyid:
             params.update({"monitored_by": 1, "proxyid": proxyid})
         await self.api.call("host.create", params)
@@ -237,7 +256,13 @@ class HostSync:
             params["macros"] = [{"macro": SNMP_MACRO, "value": community, "type": 1}]
         elif not community and host.get("cred"):
             params["macros"] = []  # drop a secret that no longer belongs to this device
-        proxyid = await self._proxy_id(host.get("tenant") or device.get("tenant") or "default")
+        if host.get("key") and host["key"] != device["key"]:
+            # Moved to another tenant in LM: follow it (technical name, group, proxy).
+            logger.warning("zabbix sync: re-keying host %s -> %s", host["key"], device["key"])
+            params.update({"host": host_name(device["key"]),
+                           "groups": [{"groupid": await self._group_id(device["tenant"])}]})
+            host = {**host, "tenant": device["tenant"]}
+        proxyid = await self._device_proxy_id({**device, "tenant": host.get("tenant") or device.get("tenant")})
         if proxyid and host.get("proxyid") != proxyid:
             params.update({"monitored_by": 1, "proxyid": proxyid})
         elif not proxyid and host.get("proxyid", "0") != "0":
