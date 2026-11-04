@@ -63,6 +63,11 @@ class FakeApi:
                 h["macros"] = params["macros"]
             if "proxyid" in params:
                 h["monitored_by"], h["proxyid"] = str(params["monitored_by"]), str(params["proxyid"])
+            if "host" in params:
+                h["host"] = params["host"]
+            if "groups" in params:
+                h["hostgroups"] = [{"name": n} for n, g in self.groups.items()
+                                   if g == params["groups"][0]["groupid"]]
             if "templates" in params:
                 ids = {x["templateid"] for x in params["templates"]}
                 h["parentTemplates"] = [{"name": n} for n, t in self.templates.items() if t in ids]
@@ -123,6 +128,25 @@ def test_tenant_hosts_follow_the_registered_tenant_proxy():
     assert (host["monitored_by"], host["proxyid"]) == ("1", "77")
     run(sync.run([dev("TOR1", ip="10.0.0.2")], now=NOW + timedelta(days=1)))
     assert {h["proxyid"] for h in api.hosts.values()} == {"77"}
+
+
+def test_device_moved_to_tenant_group_rekeys_host_onto_member_proxy():
+    api = FakeApi()
+    api.proxies[zs.proxy_name_for("default")] = "55"
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("SW1", tenant="default")], now=NOW))
+    (host,) = api.hosts.values()
+    moved = {**dev("SW1", tenant="group:ssplm"), "moved_from": "default",
+             "proxy_tenants": ["default", "shared"]}
+    res = run(zs.HostSync(api, CFG).run([moved], now=NOW + timedelta(days=1)))
+    assert res["created"] == 0 and res["refreshed"] == 1 and len(api.hosts) == 1
+    tags = {t["tag"]: t["value"] for t in host["tags"]}
+    assert tags[zs.TAG_KEY] == "group:ssplm/sw1" and host["host"] == "group_ssplm--sw1"
+    assert host["hostgroups"] == [{"name": "LM/group:ssplm"}]
+    assert (host["monitored_by"], host["proxyid"]) == ("1", "55")
+    # Without moved_from a same-named device elsewhere is a different device.
+    run(zs.HostSync(api, CFG).run([moved, dev("SW1", tenant="other")], now=NOW + timedelta(days=2)))
+    assert len(api.hosts) == 2
 
 
 def test_unknown_type_uses_fallback_template():
