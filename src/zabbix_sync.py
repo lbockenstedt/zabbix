@@ -298,8 +298,18 @@ class HostSync:
         proxyid = await self._device_proxy_id(device)
         if proxyid:
             params.update({"monitored_by": 1, "proxyid": proxyid})
-        # Create the host.
-        await self.api.call("host.create", params)
+        # Create the host. Visible names are unique across all of Zabbix, but
+        # tenants may reuse names and IPs (e.g. 10.0.0.2 behind two proxies):
+        # on a clash, add the tenant to the visible name.
+        try:
+            await self.api.call("host.create", params)
+        except Exception as e:  # noqa: BLE001 - only the name clash is retried
+            if "same visible name" not in str(e):
+                raise
+            params["name"] = f"{device['name']} ({device['tenant']})"
+            logger.info("zabbix sync: visible name %r taken, using %r",
+                        device["name"], params["name"])
+            await self.api.call("host.create", params)
 
     async def _refresh(self, host: Dict[str, Any], device: Dict[str, Any], now: datetime) -> None:
         """Update an existing host from the latest device data."""
