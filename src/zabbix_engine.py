@@ -164,5 +164,5 @@ class ZabbixEngine:
         # Record the counts unless this was a dry run.
         if not dry_run:
             self.last_sync = {k: result[k] for k in
-                              ("created", "refreshed", "disabled", "deleted", "held", "errors")}
+                              ("created", "refreshed", "disabled", "deleted", "purged", "held", "errors")}
         return result

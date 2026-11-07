@@ -309,3 +309,29 @@ def test_register_agent_host_requires_cert_subject():
     asyncio.run(eng.register_agent_host("lrb", "pxmx-02", "lrb--pxmx-02"))
     p = api.created[0]
     assert p["tls_connect"] == 4 and p["tls_accept"] == 4 and p["tls_subject"] == "CN=lrb--pxmx-02"
+
+
+def test_unsent_ping_only_hosts_are_purged_at_once_snmp_ones_age_out():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    pings = [{**dev(f"P{i}", ip=f"10.1.0.{i}"), "snmp": False} for i in range(150)]
+    run(sync.run([dev("SW1"), dev("SW2", ip="10.0.0.2"), *pings[:2]], now=NOW))
+    run(sync.run([dev("SW1"), dev("SW2", ip="10.0.0.2"), *pings], now=NOW))
+    # Feed outage: nothing sent, nothing purged.
+    assert run(sync.run([], now=NOW))["purged"] == 0
+    # P0 is still sent (e.g. monitored from IPAM) and stays; the other pings go in batches.
+    r = run(sync.run([dev("SW1"), pings[0]], now=NOW + timedelta(hours=1)))
+    assert r["purged"] == 149 and api.calls.count("host.delete") == 2
+    names = sorted(t["value"] for h in api.hosts.values() for t in h["tags"] if t["tag"] == zs.TAG_KEY)
+    assert names == sorted([zs.device_key("lrb", "SW1"), zs.device_key("lrb", "SW2"),
+                            zs.device_key("lrb", "P0")])
+
+
+def test_unchanged_host_is_not_rewritten_until_last_seen_is_due():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("CRSW1")], now=NOW))
+    run(sync.run([dev("CRSW1")], now=NOW + timedelta(minutes=5)))
+    assert "host.update" not in api.calls
+    run(sync.run([dev("CRSW1")], now=NOW + timedelta(hours=7)))
+    assert api.calls.count("host.update") == 1
