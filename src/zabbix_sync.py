@@ -106,6 +106,11 @@ def templates_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
     return [cfg["fallback_template"]]
 
 
+def _ip_named(key: str) -> bool:
+    """True when the lm-key's name part is a bare IPv4 address."""
+    return bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", key.split("/", 1)[-1]))
+
+
 def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]],
                now: datetime, cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Decide what to do. ``existing`` maps lm-key -> managed host:
@@ -130,11 +135,13 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
         else:
             create.append(d)
 
-    # Unseen ping-only hosts (no SNMP interface) were auto-added by the old
-    # scanner feed; LM no longer sends them, so delete them now (no age-out).
-    # Only with a non-empty feed, so an outage cannot wipe hosts LM still wants.
+    # Unseen hosts the old scanner feed auto-added are deleted now (no age-out):
+    # ping-only hosts (no SNMP interface), and hosts named by bare IP (a second
+    # address of a box already monitored under its sysName). Only with a
+    # non-empty feed, so an outage cannot wipe hosts LM still wants.
     purge_hosts = [{**h, "key": k} for k, h in existing.items() if seen_keys and k not in seen_keys
-                   and not any(str(i.get("type")) == "2" for i in h.get("interfaces") or [])]
+                   and (_ip_named(k) or not any(str(i.get("type")) == "2"
+                                                for i in h.get("interfaces") or []))]
     purged = {h["key"] for h in purge_hosts}
 
     # Unseen hosts: disable after stale_days, delete after delete_days disabled.
