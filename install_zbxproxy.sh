@@ -40,7 +40,19 @@ setkey() { grep -q "^$1=" "$CONF" && sed -i "s|^$1=.*|$1=$2|" "$CONF" || echo "$
 setkey ProxyMode 0
 setkey Server "$SERVER"
 setkey Hostname "$PROXY_NAME"
-setkey DBName /var/lib/zabbix/zabbix_proxy.db
+# The proxy DB lives in RAM (/run): the hourly housekeeper's SQLite deletes and
+# fsyncs stalled slow VM storage for ~60s, freezing everything else on the host.
+# It is only a buffer + config cache; the proxy re-creates it and re-syncs its
+# config from the server after a reboot (unsent buffered values are lost).
+DB_DIR=/run/zabbix-db
+setkey DBName "$DB_DIR/zabbix_proxy.db"
+mkdir -p /etc/systemd/system/zabbix-proxy.service.d
+cat > /etc/systemd/system/zabbix-proxy.service.d/lm-ramdb.conf <<EOF
+[Service]
+ExecStartPre=+/usr/bin/install -d -o zabbix -g zabbix -m 750 $DB_DIR
+EOF
+systemctl daemon-reload
+rm -f /var/lib/zabbix/zabbix_proxy.db
 if [ -n "$TLS_CERT" ]; then
   setkey TLSConnect cert; setkey TLSAccept cert
   setkey TLSCAFile "$TLS_CA"; setkey TLSCertFile "$TLS_CERT"; setkey TLSKeyFile "$TLS_KEY"
