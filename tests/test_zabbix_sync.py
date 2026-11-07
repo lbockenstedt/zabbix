@@ -43,11 +43,13 @@ class FakeApi:
             return [{"proxyid": self.proxies[n], "name": n}
                     for n in params["filter"]["name"] if n in self.proxies]
         if method == "host.create":
+            if any(h.get("name") == params["name"] for h in self.hosts.values()):
+                raise RuntimeError(f'Host with the same visible name "{params["name"]}" already exists.')
             hid = self._id()
             gname = next(n for n, g in self.groups.items() if g == params["groups"][0]["groupid"])
             tnames = [n for n, t in self.templates.items()
                       if t in {x["templateid"] for x in params["templates"]}]
-            self.hosts[hid] = {"hostid": hid, "status": "0", "tags": params["tags"],
+            self.hosts[hid] = {"hostid": hid, "name": params["name"], "status": "0", "tags": params["tags"],
                                "macros": params.get("macros", []),
                                "monitored_by": str(params.get("monitored_by", 0)),
                                "proxyid": str(params.get("proxyid", 0)),
@@ -335,3 +337,10 @@ def test_unchanged_host_is_not_rewritten_until_last_seen_is_due():
     assert "host.update" not in api.calls
     run(sync.run([dev("CRSW1")], now=NOW + timedelta(hours=7)))
     assert api.calls.count("host.update") == 1
+
+
+def test_same_name_and_ip_in_two_tenants_get_tenant_qualified_visible_name():
+    api = FakeApi()
+    run(zs.HostSync(api, CFG).run([dev("10.0.0.2", tenant="lrb", ip="10.0.0.2"),
+                                   dev("10.0.0.2", tenant="dxp", ip="10.0.0.2")], now=NOW))
+    assert sorted(h["name"] for h in api.hosts.values()) == ["10.0.0.2", "10.0.0.2 (dxp)"]
