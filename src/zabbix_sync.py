@@ -11,6 +11,9 @@ Two guards stop a source outage from wiping the fleet:
 * stalled feed: nothing in a large fleet was seen recently -> hold all age-out.
 * mass change: age-out would touch more than ``max_age_out_pct`` of a tenant's
   hosts in one run -> hold that tenant and report it.
+
+Ping-only hosts (no SNMP interface) that LM no longer sends are deleted at
+once: the scanner no longer adds them, only hosts LM explicitly sends stay.
 """
 # Standard library imports.
 import logging
@@ -35,6 +38,9 @@ DEFAULTS = {
     "delete_days": 30,
     "max_age_out_pct": 5,
     "min_fleet": 3,
+    # Re-stamp lm-last-seen at most this often: every host update is a Zabbix
+    # config change, and rewriting thousands each run floods the changelog.
+    "touch_hours": 6,
     "fallback_template": "ICMP Ping",
     "snmp_template": "Network Generic Device by SNMP",
     "templates": {},
@@ -124,11 +130,18 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
         else:
             create.append(d)
 
+    # Unseen ping-only hosts (no SNMP interface) were auto-added by the old
+    # scanner feed; LM no longer sends them, so delete them now (no age-out).
+    # Only with a non-empty feed, so an outage cannot wipe hosts LM still wants.
+    purge_hosts = [{**h, "key": k} for k, h in existing.items() if seen_keys and k not in seen_keys
+                   and not any(str(i.get("type")) == "2" for i in h.get("interfaces") or [])]
+    purged = {h["key"] for h in purge_hosts}
+
     # Unseen hosts: disable after stale_days, delete after delete_days disabled.
     disable: List[Dict[str, Any]] = []
     delete: List[Dict[str, Any]] = []
     for key, host in existing.items():
-        if key in seen_keys or not host.get("last_seen"):
+        if key in seen_keys or key in purged or not host.get("last_seen"):
             continue  # no last_seen means never swept
         if host["status"] == 0 and now - host["last_seen"] > stale:
             disable.append({**host, "key": key})
@@ -147,7 +160,7 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
 
     # Guard 2: hold any tenant where age-out would touch too many hosts.
     for tenant in {h["tenant"] for h in disable + delete}:
-        fleet = sum(1 for h in existing.values() if h["tenant"] == tenant)
+        fleet = sum(1 for k, h in existing.items() if h["tenant"] == tenant and k not in purged)
         touched = sum(1 for h in disable + delete if h["tenant"] == tenant)
         limit = max(1, fleet * cfg["max_age_out_pct"] // 100)
         if touched > limit:
@@ -158,7 +171,7 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
 
     # Return the plan.
     return {"create": create, "refresh": refresh, "disable": disable,
-            "delete": delete, "held": held}
+            "delete": delete, "purge": purge_hosts, "held": held}
 
 
 class HostSync:
@@ -331,8 +344,13 @@ class HostSync:
                 "hostid": host["hostid"], "type": 2, "main": 1, "useip": 1,
                 "ip": device["ip"], "dns": "", "port": "161",
                 "details": {"version": 2, "bulk": 1, "community": SNMP_MACRO}})
-        # Apply the update.
-        await self.api.call("host.update", params)
+        # Skip the update when nothing changed and last-seen is still fresh.
+        fresh = host.get("last_seen") and \
+            now - host["last_seen"] < timedelta(hours=self.cfg["touch_hours"])
+        unchanged = host.get("status") == 0 and cred == host.get("cred", "") \
+            and set(params) == {"hostid", "status", "tags"}
+        if not (fresh and unchanged):
+            await self.api.call("host.update", params)
         # Then remove the old agent interface if SNMP was already set up.
         if snmp_if:  # only once the SNMP interface already existed before this run
             await self._drop_agent_interface(host, device)
@@ -364,9 +382,10 @@ class HostSync:
         existing = await self.load_existing()
         plan = build_plan(existing, devices, now, self.cfg)
         # Summary of planned and completed actions.
-        summary = {"created": 0, "refreshed": 0, "disabled": 0, "deleted": 0,
+        summary = {"created": 0, "refreshed": 0, "disabled": 0, "deleted": 0, "purged": 0,
                    "errors": [], "held": plan["held"], "dry_run": dry_run,
-                   "planned": {k: len(plan[k]) for k in ("create", "refresh", "disable", "delete")}}
+                   "planned": {k: len(plan[k]) for k in
+                               ("create", "refresh", "disable", "delete", "purge")}}
         # Log any holds.
         for reason in plan["held"]:
             logger.warning("zabbix sync hold: %s", reason)
@@ -396,7 +415,16 @@ class HostSync:
                                    cred=h.get("cred", ""))}))
         for h in plan["delete"]:
             await attempt("deleted", f"delete {h['key']}", self.api.call("host.delete", [h["hostid"]]))
+        # Purge ping-only hosts in batches (there can be thousands).
+        for i in range(0, len(plan["purge"]), 100):
+            batch = plan["purge"][i:i + 100]
+            try:
+                await self.api.call("host.delete", [h["hostid"] for h in batch])
+                summary["purged"] += len(batch)
+            except Exception as e:  # noqa: BLE001 - one bad batch must not stop the run
+                logger.error("zabbix sync error: purge %d ping-only hosts: %s", len(batch), e)
+                summary["errors"].append(f"purge batch {i // 100}: {e}")
         # Log the counts and return the summary.
         logger.info("zabbix sync done: %s", {k: summary[k] for k in
-                                             ("created", "refreshed", "disabled", "deleted")})
+                                             ("created", "refreshed", "disabled", "deleted", "purged")})
         return summary
