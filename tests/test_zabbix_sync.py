@@ -329,6 +329,15 @@ def test_unsent_ping_only_hosts_are_purged_at_once_snmp_ones_age_out():
                             zs.device_key("lrb", "P0")])
 
 
+def test_unsent_ip_named_snmp_host_is_purged():
+    # The old feed named a box's second address by IP; it is a duplicate, deleted at once.
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("SW1"), dev("10.0.0.9", ip="10.0.0.9")], now=NOW))
+    assert run(sync.run([dev("SW1")], now=NOW + timedelta(hours=1)))["purged"] == 1
+    assert len(api.hosts) == 1
+
+
 def test_unchanged_host_is_not_rewritten_until_last_seen_is_due():
     api = FakeApi()
     sync = zs.HostSync(api, CFG)
