@@ -73,6 +73,9 @@ class FakeApi:
             if "templates" in params:
                 ids = {x["templateid"] for x in params["templates"]}
                 h["parentTemplates"] = [{"name": n} for n, t in self.templates.items() if t in ids]
+            if "templates_clear" in params:
+                h["cleared"] = [n for n, t in self.templates.items()
+                                if t in {x["templateid"] for x in params["templates_clear"]}]
             return {"hostids": [params["hostid"]]}
         if method == "hostinterface.create":
             self.hosts[params["hostid"]]["interfaces"].append(
@@ -245,6 +248,8 @@ def test_snmp_credential_found_later_adds_snmp_interface():
     host = next(iter(api.hosts.values()))
     assert sorted(i["type"] for i in host["interfaces"]) == ["1", "2"]
     assert {t["name"] for t in host["parentTemplates"]} == {"Network Generic Device by SNMP"}
+    # The ICMP template it replaced is cleared, not left polling.
+    assert host["cleared"] == ["ICMP Ping"]
 
 
 def test_snmp_interface_ip_follows_preferred_address():
