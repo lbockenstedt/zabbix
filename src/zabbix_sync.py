@@ -20,6 +20,7 @@ import logging
 import hashlib
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("ZabbixSync")
@@ -43,8 +44,14 @@ DEFAULTS = {
     "touch_hours": 6,
     "fallback_template": "ICMP Ping",
     "snmp_template": "Network Generic Device by SNMP",
-    "templates": {"truenas": "TrueNAS CORE by SNMP"},
+    "templates": {"truenas": "TrueNAS SCALE by SNMP"},
 }
+
+# Templates shipped with this repo; imported into Zabbix when missing there.
+TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+IMPORT_RULES = {k: {"createMissing": True} for k in (
+    "template_groups", "templates", "items", "triggers", "discoveryRules", "graphs",
+    "templateDashboards", "valueMaps")}
 
 
 def device_key(tenant: str, name: str) -> str:
@@ -190,6 +197,20 @@ class HostSync:
         self.api = api
         self.cfg = {**DEFAULTS, **(cfg or {})}
         self.cfg["templates"] = {**DEFAULTS["templates"], **(cfg or {}).get("templates", {})}
+
+    async def ensure_bundled_templates(self) -> List[str]:
+        """Import each bundled template Zabbix does not have yet; returns the imported names."""
+        imported = []
+        for path in sorted(TEMPLATE_DIR.glob("*.yaml")):
+            text = path.read_text()
+            m = re.search(r"^\s*template:\s*'?(.+?)'?\s*$", text, re.M)
+            if not m or await self._ids("template.get", [m.group(1)], "templateid"):
+                continue
+            await self.api.call("configuration.import",
+                                {"format": "yaml", "source": text, "rules": IMPORT_RULES})
+            logger.info("zabbix sync: imported template %s", m.group(1))
+            imported.append(m.group(1))
+        return imported
 
     async def load_existing(self) -> Dict[str, Dict[str, Any]]:
         """Load managed hosts from Zabbix, keyed by their lm-key tag."""
@@ -413,6 +434,12 @@ class HostSync:
         # Dry run: report the plan only.
         if dry_run:
             return summary
+        # Bundled templates must exist before hosts link to them.
+        try:
+            summary["templates_imported"] = await self.ensure_bundled_templates()
+        except Exception as e:  # noqa: BLE001 - hosts still sync; linking reports the gap
+            logger.error("zabbix sync error: template import: %s", e)
+            summary["errors"].append(f"template import: {e}")
 
         async def attempt(counter: str, label: str, coro) -> None:
             """Run one action and count it; on error log it and record the message."""
