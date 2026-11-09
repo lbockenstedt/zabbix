@@ -1,6 +1,7 @@
 """Tests for the inventory -> Zabbix reconcile (plan rules + apply against a fake API)."""
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +34,10 @@ class FakeApi:
         if method == "template.get":
             return [{"templateid": self.templates[n], "name": n}
                     for n in params["filter"]["name"] if n in self.templates]
+        if method == "configuration.import":
+            name = re.search(r"template:\s*'?(.+?)'?\s*$", params["source"], re.M).group(1)
+            self.templates[name] = self._id()
+            return True
         if method == "hostgroup.get":
             return [{"groupid": self.groups[n], "name": n}
                     for n in params["filter"]["name"] if n in self.groups]
@@ -174,6 +179,16 @@ def test_missing_template_is_reported_not_raised():
     api = FakeApi(templates=("ICMP Ping",))
     result = run(zs.HostSync(api, CFG).run([dev("CRSW1")], now=NOW))
     assert result["created"] == 0 and "Aruba CX by SNMP" in result["errors"][0]
+
+
+def test_bundled_template_is_imported_once_and_linked():
+    api = FakeApi()
+    r = run(zs.HostSync(api, zs.DEFAULTS).run([dev("NAS", type_="truenas")], now=NOW))
+    assert r["templates_imported"] == ["TrueNAS SCALE by SNMP"] and not r["errors"]
+    host = next(iter(api.hosts.values()))
+    assert {t["name"] for t in host["parentTemplates"]} == {"TrueNAS SCALE by SNMP"}
+    run(zs.HostSync(api, zs.DEFAULTS).run([dev("NAS", type_="truenas")], now=NOW))
+    assert api.calls.count("configuration.import") == 1
 
 
 def test_age_out_disables_then_deletes_and_reenables_on_return():
