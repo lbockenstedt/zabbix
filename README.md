@@ -18,6 +18,12 @@ LM spoke that mirrors LM's device inventory into a multi-tenant Zabbix server.
 
 A device is `{name, tenant, type, ip, snmp}`.
 
+## Templates
+
+A device's `type` picks its template through the `templates` map. The built-in default maps `truenas` to `TrueNAS SCALE by SNMP`, and a host with no mapped type gets `Network Generic Device by SNMP`. Templates Zabbix doesn't ship live in `templates/*.yaml`. Each real sync imports any that are missing from Zabbix before linking hosts. When a host's template changes, the old template is cleared, so its items stop polling.
+
+`TrueNAS SCALE by SNMP` is built from Zabbix's `TrueNAS CORE by SNMP` and remapped to SCALE's TRUENAS-MIB. SCALE's MIB has no pool sizes and no dataset table, so pool capacity comes from LM's TrueNAS API instead.
+
 ## Install
 
     sudo ./install_zabbix.sh --hub <hub> --id <spoke-id> --secret <secret>
