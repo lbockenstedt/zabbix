@@ -23,6 +23,7 @@ class FakeApi:
     def __init__(self, templates=("ICMP Ping", "Aruba CX by SNMP", "Network Generic Device by SNMP")):
         self.templates = {n: str(i) for i, n in enumerate(templates, 1)}
         self.groups, self.hosts, self.calls, self.proxies = {}, {}, [], {}
+        self.triggers = []
         self._next = 100
 
     def _id(self):
@@ -103,6 +104,13 @@ class FakeApi:
         if method == "host.get":
             return [h for h in self.hosts.values()
                     if {"tag": zs.TAG_MANAGED, "value": "1"} in h["tags"]]
+        if method == "trigger.get":
+            return [t for t in self.triggers if t["description"] in params["filter"]["description"]]
+        if method == "trigger.update":
+            for t in self.triggers:
+                if t["triggerid"] == params["triggerid"]:
+                    t["status"] = str(params["status"])
+            return {}
         raise AssertionError(method)
 
 
@@ -373,3 +381,21 @@ def test_same_name_and_ip_in_two_tenants_get_tenant_qualified_visible_name():
     run(zs.HostSync(api, CFG).run([dev("10.0.0.2", tenant="lrb", ip="10.0.0.2"),
                                    dev("10.0.0.2", tenant="dxp", ip="10.0.0.2")], now=NOW))
     assert sorted(h["name"] for h in api.hosts.values()) == ["10.0.0.2", "10.0.0.2 (dxp)"]
+
+
+def test_renamed_host_with_same_address_is_purged_at_once():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    run(sync.run([dev("n31-crsw1", ip="172.21.0.11")], now=NOW))
+    res = run(sync.run([dev("n31-r39r-crsw1", ip="172.21.0.11")], now=NOW + timedelta(minutes=5)))
+    assert res["purged"] == 1 and res["created"] == 1
+    assert [h["name"] for h in api.hosts.values()] == ["n31-r39r-crsw1"]
+
+
+def test_zfs_memory_triggers_are_disabled_on_an_existing_template():
+    api = FakeApi(templates=("ICMP Ping", "Aruba CX by SNMP", "TrueNAS SCALE by SNMP"))
+    api.triggers = [{"triggerid": "1", "status": "0", "description": "TrueNAS SCALE: High memory utilization"},
+                    {"triggerid": "2", "status": "0", "description": "TrueNAS SCALE: Unavailable by ICMP ping"}]
+    res = run(zs.HostSync(api, CFG).run([], now=NOW))
+    assert res["triggers_disabled"] == 1 and not res["errors"]
+    assert [t["status"] for t in api.triggers] == ["1", "0"]
