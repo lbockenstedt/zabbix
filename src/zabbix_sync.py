@@ -49,6 +49,12 @@ DEFAULTS = {
 
 # Templates shipped with this repo; imported into Zabbix when missing there.
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
+# Template triggers kept disabled even where Zabbix already has an older copy of the
+# template: TrueNAS uses all free RAM for the ZFS ARC cache by design, so memory
+# utilisation always reads high and says nothing about health.
+DISABLED_TRIGGERS = {"TrueNAS SCALE by SNMP": [
+    "TrueNAS SCALE: High memory utilization",
+    "TrueNAS SCALE: Lack of available memory"]}
 IMPORT_RULES = {k: {"createMissing": True} for k in (
     "template_groups", "templates", "items", "triggers", "discoveryRules", "graphs",
     "templateDashboards", "valueMaps")}
@@ -146,9 +152,19 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
     # ping-only hosts (no SNMP interface), and hosts named by bare IP (a second
     # address of a box already monitored under its sysName). Only with a
     # non-empty feed, so an outage cannot wipe hosts LM still wants.
+    # A host renamed in LM (old name, same address, same tenant) is superseded by
+    # the host for its new name and goes too.
+    live_ips = {(d["tenant"].casefold(), str(d.get("ip") or "").strip())
+                for d in devices if d.get("ip")}
+
+    def _superseded(k: str, h: Dict[str, Any]) -> bool:
+        tenant = k.split("/", 1)[0]
+        return any((tenant, str(i.get("ip") or "").strip()) in live_ips
+                   for i in h.get("interfaces") or [])
+
     purge_hosts = [{**h, "key": k} for k, h in existing.items() if seen_keys and k not in seen_keys
-                   and (_ip_named(k) or not any(str(i.get("type")) == "2"
-                                                for i in h.get("interfaces") or []))]
+                   and (_ip_named(k) or _superseded(k, h)
+                        or not any(str(i.get("type")) == "2" for i in h.get("interfaces") or []))]
     purged = {h["key"] for h in purge_hosts}
 
     # Unseen hosts: disable after stale_days, delete after delete_days disabled.
@@ -211,6 +227,23 @@ class HostSync:
             logger.info("zabbix sync: imported template %s", m.group(1))
             imported.append(m.group(1))
         return imported
+
+    async def apply_trigger_overrides(self) -> int:
+        """Disable the DISABLED_TRIGGERS on the templates in Zabbix; returns how many changed."""
+        changed = 0
+        for tpl, names in DISABLED_TRIGGERS.items():
+            ids = await self._ids("template.get", [tpl], "templateid")
+            if not ids:
+                continue
+            found = await self.api.call("trigger.get", {
+                "output": ["triggerid", "description", "status"],
+                "templateids": [ids[0]["templateid"]], "inherited": False,
+                "filter": {"description": names}})
+            for t in found or []:
+                if str(t.get("status")) != "1":
+                    await self.api.call("trigger.update", {"triggerid": t["triggerid"], "status": 1})
+                    changed += 1
+        return changed
 
     async def load_existing(self) -> Dict[str, Dict[str, Any]]:
         """Load managed hosts from Zabbix, keyed by their lm-key tag."""
@@ -440,6 +473,11 @@ class HostSync:
         except Exception as e:  # noqa: BLE001 - hosts still sync; linking reports the gap
             logger.error("zabbix sync error: template import: %s", e)
             summary["errors"].append(f"template import: {e}")
+        try:
+            summary["triggers_disabled"] = await self.apply_trigger_overrides()
+        except Exception as e:  # noqa: BLE001 - a template tweak must not stop the host sync
+            logger.error("zabbix sync error: trigger overrides: %s", e)
+            summary["errors"].append(f"trigger overrides: {e}")
 
         async def attempt(counter: str, label: str, coro) -> None:
             """Run one action and count it; on error log it and record the message."""

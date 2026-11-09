@@ -1144,6 +1144,7 @@ zabbix_export:
         name: 'TrueNAS SCALE: High memory utilization'
         event_name: 'TrueNAS SCALE: High memory utilization (>{$MEMORY.UTIL.MAX}% for 5m)'
         priority: AVERAGE
+        status: DISABLED
         description: The system is running out of free memory.
         dependencies:
         - name: 'TrueNAS SCALE: Lack of available memory'
@@ -3323,6 +3324,7 @@ zabbix_export:
     event_name: 'TrueNAS SCALE: Lack of available memory (<{$MEMORY.AVAILABLE.MIN} of {ITEM.VALUE2})'
     opdata: 'Available: {ITEM.LASTVALUE1}, total: {ITEM.LASTVALUE2}'
     priority: AVERAGE
+    status: DISABLED
     description: The system is running out of memory.
     tags:
     - tag: scope
