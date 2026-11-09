@@ -43,7 +43,7 @@ DEFAULTS = {
     "touch_hours": 6,
     "fallback_template": "ICMP Ping",
     "snmp_template": "Network Generic Device by SNMP",
-    "templates": {},
+    "templates": {"truenas": "TrueNAS CORE by SNMP"},
 }
 
 
@@ -348,6 +348,10 @@ class HostSync:
         want = templates_for(device, self.cfg)
         if set(want) != host["templates"]:
             params["templates"] = await self._ids("template.get", want, "templateid")
+            # Clear the replaced templates' items too, or they keep polling.
+            dropped = sorted(host["templates"] - set(want))
+            if dropped:
+                params["templates_clear"] = await self._ids("template.get", dropped, "templateid")
         # An existing ICMP/agent interface is linked to items and cannot change
         # type, so the SNMP interface is added next to it.
         snmp_if = [i for i in host.get("interfaces", []) if str(i.get("type")) == "2"]
