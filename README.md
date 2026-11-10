@@ -7,24 +7,6 @@ LM spoke that mirrors LM's device inventory into a multi-tenant Zabbix server.
 - A device not seen for 7 days is disabled; 30 days later it is deleted. Safety holds protect against feed outages and mass changes.
 - `MON_REBUILD` repopulates a fresh Zabbix entirely from the inventory, so Zabbix can be deleted and reinstalled cheaply.
 
-## Repository layout
-
-| Path | What it holds |
-| :--- | :--- |
-| `.claude/` | Fleet-owned skills, synced from lm; edit them in lm. |
-| `.github/` | CI (`workflows/ci.yml`), the thin `promote`/`backmerge` callers, promotion scripts and fleet-owned agents. |
-| `src/` | The spoke's Python source (entry point, engine, control plane). |
-| `templates/` | Zabbix templates the spoke imports (TrueNAS SNMP). |
-| `tests/` | pytest suite; CI runs it in the `test` job. |
-| `AGENTS.md` | Orientation for people and AI agents; the fleet rules block is synced from lm. |
-| `install_zabbix.sh` | Spoke installer (idempotent; safe to re-run). |
-| `install_zabbix_server.sh` | Installs a Zabbix server. |
-| `install_zbxagent.sh` | Installs a Zabbix agent on a host. |
-| `install_zbxproxy.sh` | Installs a Zabbix proxy. |
-| `README.md` | This file. |
-| `requirements.txt` | Runtime Python dependencies. |
-| `VERSION` | Bot-owned version; promotion bumps it. Never edit by hand. |
-
 ## Commands
 
 | Command | Data | Purpose |
