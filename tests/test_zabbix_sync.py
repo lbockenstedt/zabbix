@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest  # noqa: E402
+
 import zabbix_sync as zs  # noqa: E402
+from zabbix_api import ZabbixApiError, ZabbixReadOnlyError  # noqa: E402
 
 NOW = datetime(2026, 11, 1, tzinfo=timezone.utc)
 CFG = {**zs.DEFAULTS, "templates": {"cx_switch": "Aruba CX by SNMP"}}
@@ -294,6 +297,31 @@ def test_agent_interface_dropped_once_snmp_interface_exists():
     run(h.run([{**d, "snmp": True, "snmp_community": "c"}], now=NOW))
     host = next(iter(api.hosts.values()))
     assert [i["type"] for i in host["interfaces"]] == ["2"]
+
+
+@pytest.mark.parametrize("error, refreshed", [
+    # Zabbix refuses while items still use the interface: logged, retried next sync.
+    (ZabbixApiError("hostinterface.delete: Interface is linked to items"), 1),
+    # This spoke refused the write (read-only came on mid-sync): the refresh
+    # fails, so the hub does not record a sync that wrote nothing as a success.
+    (ZabbixReadOnlyError("read-only on this environment: hostinterface.delete refused"), 0),
+], ids=["in-use", "refused"])
+def test_a_failed_agent_interface_drop(error, refreshed):
+    api = FakeApi()
+    h = zs.HostSync(api, CFG)
+    d = {**dev("sw", type_="x"), "snmp": True, "snmp_community": "c"}
+    run(h.run([{**d, "snmp": False}], now=NOW))
+    run(h.run([d], now=NOW))
+    real_call = api.call
+
+    async def call(method, params=None):
+        if method == "hostinterface.delete":
+            raise error
+        return await real_call(method, params)
+    api.call = call
+    summary = run(h.run([d], now=NOW))
+    assert summary["refreshed"] == refreshed
+    assert [e.endswith(str(error)) for e in summary["errors"]] == ([] if refreshed else [True])
 
 
 class AgentApi:

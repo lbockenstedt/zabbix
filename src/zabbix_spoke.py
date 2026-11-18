@@ -19,6 +19,14 @@ logger = logging.getLogger("ZabbixSpoke")
 # Credential fields are fully masked in logs.
 _SENSITIVE = {"token", "password", "secret", "hub_secret", "snmp_community"}
 
+# Commands that change Zabbix. Only the sync commands have a dry run that
+# writes nothing; registering a proxy or an agent always writes.
+_WRITE_COMMANDS = {"MON_PROXY_REGISTER", "MON_AGENT_REGISTER", "MON_SYNC", "MON_REBUILD"}
+_DRY_RUN_COMMANDS = {"MON_SYNC", "MON_REBUILD"}
+READ_ONLY_MESSAGE = "Zabbix is read-only on this environment; only reads and sync dry runs are allowed"
+# The hub's read-only switch and the time it was saved (see _drop_older_read_only).
+_READ_ONLY_KEYS = ("read_only", "read_only_saved_at")
+
 
 class ZabbixSpoke(BaseSpoke):
     """Zabbix monitoring spoke. Turns hub MON_* commands into Zabbix API work.
@@ -47,6 +55,27 @@ class ZabbixSpoke(BaseSpoke):
             return data
         # Replace sensitive values with a fixed mask.
         return {k: ("********" if k in _SENSITIVE else v) for k, v in data.items()}
+
+    def _drop_older_read_only(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Return ``data`` without the read-only switch when the hub saved it
+        before the switch already applied.
+
+        The hub stamps the switch with the time it was saved
+        (``read_only_saved_at``). An older value can still arrive: the hub's
+        mailbox replays a push the spoke did not answer in time, and a
+        reconnect sends the current config before that backlog. Dropping it
+        means a replay never undoes a newer switch. A push without the stamp
+        (an older hub) applies as before."""
+        # Compare the push's stamp with the one applied last.
+        sent = data.get("read_only_saved_at")
+        applied = (self.config or {}).get("read_only_saved_at")
+        if not (isinstance(sent, (int, float)) and isinstance(applied, (int, float))
+                and sent < applied):
+            return data
+        # Older: keep the rest of the push, drop the switch.
+        logger.info("Ignored an older Zabbix read-only value from the hub (saved at %s; "
+                    "the applied one was saved at %s)", sent, applied)
+        return {k: v for k, v in data.items() if k not in _READ_ONLY_KEYS}
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS, MON_HOSTS,
@@ -85,9 +114,25 @@ class ZabbixSpoke(BaseSpoke):
         """Run one normalized command and return its result envelope."""
         if cmd == "UPDATE_CONFIG":
             # Merge: the hub's pushed config may omit the role-load config (url/token).
-            self.config = {**(self.config or {}), **data}
+            # read_only merges like any other key, unless it is older than the
+            # one applied. The hub sends it in the UPDATE_CONFIG it pushes each
+            # time this spoke connects; the spoke has no background loops, so it
+            # only writes when the hub asks. No await here: one push applies at a time.
+            self.config = {**(self.config or {}), **self._drop_older_read_only(data)}
             self.engine.set_config(self.config)
-            return {"status": "SUCCESS", "message": "zabbix configuration updated from Hub"}
+            reply = {"status": "SUCCESS", "message": "zabbix configuration updated from Hub"}
+            # Echo the flag in force (the newer one if this push was older), so
+            # the hub knows this spoke understood it.
+            if "read_only" in data:
+                reply["read_only"] = self.engine.read_only
+            return reply
+        # Read-only (a Zabbix shared with another environment): refuse writes
+        # with one clear message instead of one error per host. The message is
+        # also the one entry in "errors", the list a sync reply carries, so a
+        # hub that judges a sync by its errors records the refusal as failed.
+        dry_run = cmd in _DRY_RUN_COMMANDS and bool(data.get("dry_run"))
+        if self.engine.read_only and cmd in _WRITE_COMMANDS and not dry_run:
+            return {"status": "ERROR", "message": READ_ONLY_MESSAGE, "errors": [READ_ONLY_MESSAGE]}
         # Version query.
         if cmd in ("GET_VERSION", "GET-VERSION"):
             return {"status": "SUCCESS", "version": self.get_version()}

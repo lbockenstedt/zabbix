@@ -19,25 +19,80 @@ class ZabbixEngine:
         """Start with no client or sync result, then apply the config."""
         self.config: Dict[str, Any] = {}
         self._api = None
+        # Counts changes of URL, token or TLS setting; each client is built
+        # for one count (see _write_refusal).
+        self._conn_gen = 0
+        # Writes still on their way to Zabbix, from any client (see
+        # ZabbixApi._send_write), so a change that refuses them stops them.
+        self._writes = set()
         self.last_sync: Dict[str, Any] = {}
         self.set_config(config or {})
 
+    @staticmethod
+    def _connection(config: Dict[str, Any]) -> tuple:
+        """The settings a client is built from: URL, token and TLS verification."""
+        return config.get("url"), config.get("token"), config.get("verify_tls", True)
+
     def set_config(self, config: Dict[str, Any]) -> None:
-        """Config keys: url, token, verify_tls, plus sync settings
+        """Config keys: url, token, verify_tls, read_only, plus sync settings
         (stale_days, delete_days, max_age_out_pct, templates, tenant_proxies)."""
+        # A new URL, token or TLS setting stops every older client's writes,
+        # before anything else changes. The same values, which the hub re-sends
+        # on every reconnect, leave older clients as they were.
+        repointed = self._connection(config) != self._connection(self.config)
+        if repointed:
+            self._conn_gen += 1
         # Store the config and drop the old client.
         self.config = config
         self._api = None  # rebuilt lazily with the new url/token
+        # Writes refused from now on that are already on their way stop too:
+        # each may still be waiting for its connection, with nothing sent.
+        # No await here, so none of them sends anything before it is stopped.
+        if repointed or self.read_only:
+            for task in list(self._writes):
+                task.cancel()
+
+    @property
+    def read_only(self) -> bool:
+        """True when the hub marked this Zabbix read-only (shared with another
+        environment, hub System → Sync)."""
+        return bool(self.config.get("read_only"))
 
     def _client(self) -> ZabbixApi:
         """Return the API client, creating it from the config on first use."""
         # Create the client; URL and token are required.
         if self._api is None:
-            if not self.config.get("url") or not self.config.get("token"):
+            url, token = self.config.get("url"), self.config.get("token")
+            if not url or not token:
                 raise RuntimeError("zabbix url/token not configured")
-            self._api = ZabbixApi(self.config["url"], self.config["token"],
-                                  verify=self.config.get("verify_tls", True))
+            # The client asks _write_refusal before every write, for the
+            # connection settings it was built for, so a sync still holding a
+            # replaced client stops writing when read-only is switched on.
+            gen = self._conn_gen
+            self._api = ZabbixApi(url, token, verify=self.config.get("verify_tls", True),
+                                  write_refusal=lambda: self._write_refusal(gen),
+                                  writes=self._writes)
         return self._api
+
+    def _write_refusal(self, gen: int) -> str:
+        """Why a client built for connection count ``gen`` may not write now, or "".
+
+        A client built before the URL, token or TLS setting last changed never
+        writes again: not once read-only is off, and not after the config
+        moves back to the old values. One push can point a dev spoke away from
+        a shared Zabbix and turn read-only off, and a sync still holding the
+        old client must not then write anywhere with it. That reason is
+        checked first because turning read-only off would not end it.
+        Otherwise read-only refuses every write. The hub re-sends the same URL
+        and token on every reconnect, which leaves older clients as they were
+        (see ``set_config``)."""
+        # A client left over from before a change of URL, token or TLS setting.
+        if gen != self._conn_gen:
+            return "This spoke now uses a different Zabbix URL, token or TLS setting"
+        # Read-only: nothing writes.
+        if self.read_only:
+            return "Zabbix is read-only on this environment"
+        return ""
 
     async def status(self) -> Dict[str, Any]:
         """Reachability + version + managed host count (read-only)."""

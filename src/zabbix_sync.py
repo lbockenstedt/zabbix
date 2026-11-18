@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from zabbix_api import ZabbixReadOnlyError
+
 logger = logging.getLogger("ZabbixSync")
 
 # Tag names used on managed hosts, and the SNMP community macro.
@@ -433,7 +435,9 @@ class HostSync:
     async def _drop_agent_interface(self, host: Dict[str, Any], device: Dict[str, Any]) -> None:
         """An SNMP-monitored device must not keep the agent-type (ZBX) interface it
         was created with before SNMP was verified. Zabbix refuses while items
-        still use it, so a failure is only logged and retried next sync."""
+        still use it, so a failure is only logged and retried next sync. A
+        write this spoke refused itself (read-only, or a replaced connection)
+        is raised instead, so the refresh counts as failed, not as done."""
         # Only for SNMP devices that already have an SNMP interface.
         if not device.get("snmp"):
             return
@@ -444,7 +448,9 @@ class HostSync:
             if str(i.get("type")) == "1":
                 try:
                     await self.api.call("hostinterface.delete", [i["interfaceid"]])
-                except Exception as e:  # noqa: BLE001
+                except ZabbixReadOnlyError:
+                    raise
+                except Exception as e:  # noqa: BLE001 - interface still in use; retried next sync
                     logger.warning("zabbix sync: cannot drop agent interface of %s: %s",
                                    device.get("key"), e)
 
