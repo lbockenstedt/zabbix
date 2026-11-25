@@ -17,7 +17,10 @@ from zabbix_engine import ZabbixEngine
 logger = logging.getLogger("ZabbixSpoke")
 
 # Credential fields are fully masked in logs.
-_SENSITIVE = {"token", "password", "secret", "hub_secret", "snmp_community"}
+_SENSITIVE = {
+    "token", "password", "secret", "hub_secret", "snmp_community",
+    "api_token", "community", "privkey", "private_key", "bearer", "auth"
+}
 
 # Commands that change Zabbix. Only the sync commands have a dry run that
 # writes nothing; registering a proxy or an agent always writes.
@@ -45,16 +48,26 @@ class ZabbixSpoke(BaseSpoke):
         try:
             return {"status": "SUCCESS", **await self.engine.status()}
         except Exception as e:  # noqa: BLE001
-            return {"status": "ERROR", "message": str(e)}
+            sanitized = self.engine._sanitize_err(str(e))
+            logger.debug("Zabbix get_status failed: %s", sanitized)
+            return {"status": "ERROR", "message": sanitized}
 
     @staticmethod
     def _mask(data: Any) -> Any:
-        """Return a copy of data with sensitive values masked."""
-        # Leave non-dict values unchanged.
-        if not isinstance(data, dict):
-            return data
-        # Replace sensitive values with a fixed mask.
-        return {k: ("********" if k in _SENSITIVE else v) for k, v in data.items()}
+        """Recursively redact sensitive credential keys from dicts and lists."""
+        if isinstance(data, dict):
+            out = {}
+            for k, v in data.items():
+                k_lower = str(k).lower()
+                if (k_lower in _SENSITIVE or
+                        any(k_lower.endswith(sfx) for sfx in ("_secret", "_password", "_token", "_key", "password", "secret", "token", "community"))):
+                    out[k] = "********"
+                else:
+                    out[k] = ZabbixSpoke._mask(v)
+            return out
+        elif isinstance(data, list):
+            return [ZabbixSpoke._mask(item) for item in data]
+        return data
 
     def _drop_older_read_only(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Return ``data`` without the read-only switch when the hub saved it
@@ -66,6 +79,8 @@ class ZabbixSpoke(BaseSpoke):
         reconnect sends the current config before that backlog. Dropping it
         means a replay never undoes a newer switch. A push without the stamp
         (an older hub) applies as before."""
+        if not isinstance(data, dict):
+            return {}
         # Compare the push's stamp with the one applied last.
         sent = data.get("read_only_saved_at")
         applied = (self.config or {}).get("read_only_saved_at")
@@ -80,17 +95,20 @@ class ZabbixSpoke(BaseSpoke):
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS, MON_HOSTS,
         MON_SYNC (devices, dry_run), MON_REBUILD (devices; full repopulate)."""
-        # Normalize the command; for syncs log only the device count, not the list.
-        cmd = (command_type or "").upper()
+        # Ensure data is treated safely before accessing .get()
+        safe_data = data if isinstance(data, dict) else {}
+        cmd = str(command_type or "").upper()
         logger.info("Handling Zabbix command: %s with data %s", command_type,
-                    self._mask(data) if cmd != "MON_SYNC" and cmd != "MON_REBUILD"
-                    else {"devices": len((data or {}).get("devices", [])),
-                          "dry_run": (data or {}).get("dry_run", False)})
+                    self._mask(safe_data) if cmd not in ("MON_SYNC", "MON_REBUILD")
+                    else {"devices": len(safe_data.get("devices", []) if isinstance(safe_data.get("devices"), list) else []),
+                          "dry_run": safe_data.get("dry_run", False)})
         # Dispatch; any exception becomes an error envelope.
         try:
-            res = await self._dispatch(cmd, data if isinstance(data, dict) else {})
+            res = await self._dispatch(cmd, safe_data)
         except Exception as e:  # noqa: BLE001 - always answer the hub with an envelope
-            res = {"status": "ERROR", "message": str(e)}
+            sanitized = self.engine._sanitize_err(str(e))
+            logger.error("Zabbix handle_command failed for %s: %s", command_type, sanitized)
+            res = {"status": "ERROR", "message": sanitized}
         # Log the outcome and return the result.
         self._log_result(command_type, res)
         return res

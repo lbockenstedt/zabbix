@@ -26,6 +26,7 @@ _base.BaseSpoke = _BaseSpoke
 sys.modules.update({"core": _core, "core.src": _src, "core.src.base_spoke": _base})
 
 from zabbix_api import ZabbixReadOnlyError  # noqa: E402
+from zabbix_engine import ZabbixEngine  # noqa: E402
 from zabbix_spoke import ZabbixSpoke  # noqa: E402
 
 
@@ -35,6 +36,28 @@ def run(coro):
 
 def test_mask_hides_credentials():
     assert ZabbixSpoke._mask({"token": "abc", "url": "u"}) == {"token": "********", "url": "u"}
+    nested = {
+        "device": {
+            "Password": "p1",
+            "apiToken": "t1",
+            "meta": {"priv_secret": "s1"}
+        },
+        "credentials": [{"community": "c1", "user": "u1"}]
+    }
+    masked = ZabbixSpoke._mask(nested)
+    assert masked["device"]["Password"] == "********"
+    assert masked["device"]["apiToken"] == "********"
+    assert masked["device"]["meta"]["priv_secret"] == "********"
+    assert masked["credentials"][0]["community"] == "********"
+
+
+def test_handle_command_non_dict_data_safe():
+    spoke = ZabbixSpoke("z1", {})
+    # Non-dict data must not crash handle_command
+    res = run(spoke.handle_command("MON_STATUS", None))
+    assert res["status"] == "ERROR"
+    res2 = run(spoke.handle_command("MON_STATUS", "invalid_string"))
+    assert res2["status"] == "ERROR"
 
 
 def test_sync_requires_devices_and_logs_error(caplog):
@@ -254,3 +277,19 @@ def test_read_only_spoke_refuses_writes_but_runs_a_dry_run():
     assert calls == []
     res = run(spoke.handle_command("MON_SYNC", {"devices": [], "dry_run": True}))
     assert res["status"] == "SUCCESS" and calls == [True]
+
+
+def test_register_agent_host_tls_subject_validation():
+    spoke = ZabbixSpoke("z1", {"url": "http://z", "token": "t"})
+    with pytest.raises(ValueError, match="control characters"):
+        run(spoke.engine.register_agent_host("t1", "h1", tls_subject="bad\nCN=test"))
+
+
+def test_engine_sanitize_err():
+    msg = "Connection failed: token=secret123 password: mypassword Authorization: Bearer abcdef12345"
+    sanitized = ZabbixEngine._sanitize_err(msg)
+    assert "secret123" not in sanitized
+    assert "mypassword" not in sanitized
+    assert "abcdef12345" not in sanitized
+    assert "token=***" in sanitized or "token:***" in sanitized
+    assert "Authorization: ***" in sanitized

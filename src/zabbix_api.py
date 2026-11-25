@@ -35,7 +35,8 @@ class ZabbixApi:
     """Async client for the Zabbix JSON-RPC API using an API token."""
     def __init__(self, url: str, token: str, verify: Any = True, timeout: float = 30.0,
                  write_refusal: Optional[Callable[[], str]] = None,
-                 writes: Optional[Set["asyncio.Task"]] = None):
+                 writes: Optional[Set["asyncio.Task"]] = None,
+                 engine_cancelled: Optional[Set[int]] = None):
         """Set the endpoint and auth header and create the HTTP client.
         ``write_refusal`` (a callable) returns why writes are refused now, or
         "" to allow them. It is asked before every write, so a sync that still
@@ -47,6 +48,7 @@ class ZabbixApi:
         self._auth = "Bearer " + token
         self._write_refusal = write_refusal
         self._writes = set() if writes is None else writes
+        self._engine_cancelled = set() if engine_cancelled is None else engine_cancelled
         # Shared HTTP client with TLS and timeout settings.
         self._client = httpx.AsyncClient(
             verify=verify, timeout=timeout,
@@ -94,12 +96,16 @@ class ZabbixApi:
         except asyncio.CancelledError:
             # Stopped by the engine. When our own caller is being cancelled,
             # the cancellation goes on up instead.
-            if task.cancelled() and not asyncio.current_task().cancelling():
+            curr = asyncio.current_task()
+            is_cancelling = curr.cancelling() if (curr and hasattr(curr, "cancelling")) else False
+            is_engine = id(task) in self._engine_cancelled
+            if is_engine or (task.cancelled() and not is_cancelling and hasattr(curr, "cancelling")):
                 reason = self._write_refusal() or "The Zabbix settings changed"
                 raise ZabbixReadOnlyError(f"{reason}: {method} stopped") from None
             raise
         finally:
             self._writes.discard(task)
+            self._engine_cancelled.discard(id(task))
 
     async def aclose(self) -> None:
         """Close the HTTP client."""

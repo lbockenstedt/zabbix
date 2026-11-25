@@ -427,3 +427,28 @@ def test_zfs_memory_triggers_are_disabled_on_an_existing_template():
     res = run(zs.HostSync(api, CFG).run([], now=NOW))
     assert res["triggers_disabled"] == 1 and not res["errors"]
     assert [t["status"] for t in api.triggers] == ["1", "0"]
+
+
+def test_parse_iso_robust():
+    # Valid ISO string
+    dt = zs.parse_iso("2026-11-24T18:00:00Z")
+    assert dt is not None
+    assert dt.year == 2026
+    # Invalid strings / types return None gracefully without raising
+    assert zs.parse_iso("") is None
+    assert zs.parse_iso(None) is None
+    assert zs.parse_iso("not-a-date") is None
+    assert zs.parse_iso(12345) is None
+
+
+def test_cred_fingerprint_salted():
+    # Empty secret gives empty string
+    assert zs.cred_fingerprint("") == ""
+    assert zs.cred_fingerprint(None) == ""
+    # Fingerprint is 12 chars hex
+    fp = zs.cred_fingerprint("public")
+    assert len(fp) == 12
+    # Ensure it is salted (not bare sha256)
+    import hashlib
+    bare_sha256 = hashlib.sha256(b"public").hexdigest()[:12]
+    assert fp != bare_sha256

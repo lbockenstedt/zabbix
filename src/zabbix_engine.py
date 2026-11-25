@@ -1,6 +1,8 @@
 """Zabbix engine: owns the API client and runs inventory syncs."""
 # Standard library imports.
+import asyncio
 import logging
+import re
 from typing import Any, Dict, List
 
 # API client and inventory sync helpers.
@@ -25,6 +27,7 @@ class ZabbixEngine:
         # Writes still on their way to Zabbix, from any client (see
         # ZabbixApi._send_write), so a change that refuses them stops them.
         self._writes = set()
+        self._engine_cancelled = set()
         self.last_sync: Dict[str, Any] = {}
         self.set_config(config or {})
 
@@ -50,7 +53,9 @@ class ZabbixEngine:
         # No await here, so none of them sends anything before it is stopped.
         if repointed or self.read_only:
             for task in list(self._writes):
-                task.cancel()
+                if hasattr(task, "done") and not task.done():
+                    self._engine_cancelled.add(id(task))
+                    task.cancel()
 
     @property
     def read_only(self) -> bool:
@@ -71,7 +76,8 @@ class ZabbixEngine:
             gen = self._conn_gen
             self._api = ZabbixApi(url, token, verify=self.config.get("verify_tls", True),
                                   write_refusal=lambda: self._write_refusal(gen),
-                                  writes=self._writes)
+                                  writes=self._writes,
+                                  engine_cancelled=self._engine_cancelled)
         return self._api
 
     def _write_refusal(self, gen: int) -> str:
@@ -96,13 +102,13 @@ class ZabbixEngine:
 
     async def status(self) -> Dict[str, Any]:
         """Reachability + version + managed host count (read-only)."""
-        # Ask for the API version.
+        # Ask for the API version with timeout protection.
         api = self._client()
-        version = await api.call("apiinfo.version")
+        version = await asyncio.wait_for(api.call("apiinfo.version"), timeout=15.0)
         # Count hosts tagged as managed.
-        managed = await api.call("host.get", {
+        managed = await asyncio.wait_for(api.call("host.get", {
             "countOutput": True,
-            "tags": [{"tag": "lm-managed", "value": "1", "operator": 1}]})
+            "tags": [{"tag": "lm-managed", "value": "1", "operator": 1}]}), timeout=15.0)
         # Return the version, host count and last sync summary.
         return {"version": version, "managed_hosts": int(managed),
                 "last_sync": self.last_sync}
@@ -163,36 +169,90 @@ class ZabbixEngine:
     async def register_proxy(self, name: str, tls_subject: str = "") -> Dict[str, Any]:
         """Create the (active-mode) proxy a freshly installed zbxproxy reports as;
         Zabbix ignores a proxy it has no record of. Idempotent."""
-        # Optional TLS certificate settings.
+        clean_name = str(name).strip()
+        if not clean_name or any(ord(c) < 32 or ord(c) == 127 for c in clean_name):
+            raise ValueError(f"Invalid proxy name: {name!r}")
+        clean_subject = ""
+        if tls_subject:
+            clean = str(tls_subject).strip()
+            if any(ord(c) < 32 or ord(c) == 127 for c in clean):
+                raise ValueError(f"Invalid tls_subject containing control characters: {tls_subject!r}")
+            clean_subject = clean[3:] if clean.startswith("CN=") else clean
+            if re.search(r"[,;+=\"<>]", clean_subject):
+                raise ValueError(f"Invalid characters in tls_subject DN: {tls_subject!r}")
+
         api = self._client()
-        tls = {"tls_accept": 4, "tls_subject": f"CN={tls_subject}"} if tls_subject else {}
+        tls = {"tls_accept": 4, "tls_subject": f"CN={clean_subject}"} if clean_subject else {}
         # Look up an existing proxy by name.
-        found = await api.call("proxy.get", {"output": ["proxyid"], "filter": {"name": [name]}})
+        found = await api.call("proxy.get", {"output": ["proxyid"], "filter": {"name": [clean_name]}})
         # Found: update its TLS settings if given and return it.
         if found:
             if tls:
                 await api.call("proxy.update", {"proxyid": found[0]["proxyid"], **tls})
-            return {"proxy": name, "proxyid": found[0]["proxyid"], "created": False}
+            return {"proxy": clean_name, "proxyid": found[0]["proxyid"], "created": False}
         # Otherwise create an active-mode proxy.
-        res = await api.call("proxy.create", {"name": name, "operating_mode": 0, **tls})
-        return {"proxy": name, "proxyid": res["proxyids"][0], "created": True}
+        res = await api.call("proxy.create", {"name": clean_name, "operating_mode": 0, **tls})
+        return {"proxy": clean_name, "proxyid": res["proxyids"][0], "created": True}
+
+    _SENSITIVE_RE = re.compile(
+        r"""(?i)(?:Authorization:\s*\S+\s+\S+|(?:Bearer|Basic)\s+\S+)"""
+        r"""|://[^:\s@]+:[^@\s]+@"""
+        r"""|(["'])(?:token|password|secret|key|community|authorization|passwd)\1\s*[:=]\s*(["'])[^"']*\2"""
+        r"""|\b(?:token|password|secret|key|community|authorization|passwd)\s*[:=]\s*\S+"""
+    )
+
+    @classmethod
+    def _sanitize_err(cls, msg: str) -> str:
+        """Strip sensitive credentials from error messages."""
+        if not msg:
+            return ""
+        def _mask_match(m):
+            s = m.group(0)
+            lower = s.lower()
+            if "authorization" in lower:
+                return "Authorization: ***"
+            if "bearer" in lower:
+                return "Bearer ***"
+            if "basic" in lower:
+                return "Basic ***"
+            if "://" in s:
+                return re.sub(r"://([^:\s@]+):([^@\s]+)@", r"://\1:***@", s)
+            sep = ":" if ":" in s else "="
+            parts = s.split(sep, 1)
+            k = parts[0].strip()
+            return f"{k}=***" if sep == "=" else f"{k}: ***"
+        return cls._SENSITIVE_RE.sub(_mask_match, str(msg))
 
     async def register_agent_host(self, tenant: str, hostname: str, tls_subject: str = "") -> Dict[str, Any]:
         """Host record for an active zabbix-agent2 that reports to the tenant's proxy.
         Not tagged lm-managed, so the inventory sync never reaps it. Idempotent."""
+        clean_subject = ""
+        if tls_subject:
+            clean = str(tls_subject).strip()
+            if any(ord(c) < 32 or ord(c) == 127 for c in clean):
+                raise ValueError(f"Invalid tls_subject containing control characters: {tls_subject!r}")
+            clean_subject = clean[3:] if clean.startswith("CN=") else clean
+            if re.search(r"[,;+=\"<>]", clean_subject):
+                raise ValueError(f"Invalid characters in tls_subject DN: {tls_subject!r}")
+
         # Sync helper, the full host name and the API client.
         sync = HostSync(self._client(), self.config)
         name = host_name(f"{tenant}/{hostname}")
         api = sync.api
         # Optional TLS certificate settings.
-        tls = ({"tls_connect": 4, "tls_accept": 4, "tls_subject": f"CN={tls_subject}"}
-               if tls_subject else {})
+        tls = ({"tls_connect": 4, "tls_accept": 4, "tls_subject": f"CN={clean_subject}"}
+               if clean_subject else {})
         # Look up an existing host.
-        existing = await api.call("host.get", {"output": ["hostid"], "filter": {"host": [name]}})
+        existing = await api.call("host.get", {"output": ["hostid"], "selectTags": ["tag", "value"], "filter": {"host": [name]}})
         # Found: update its TLS settings if given and return it.
         if existing:
             if tls:
-                await api.call("host.update", {"hostid": existing[0]["hostid"], **tls})
+                tags = {t.get("tag"): t.get("value") for t in existing[0].get("tags") or []}
+                # Ensure the host is an agent host before mutating TLS
+                if "lm-agent" in tags:
+                    await api.call("host.update", {"hostid": existing[0]["hostid"], **tls})
+                else:
+                    logger.warning("Refusing to update TLS for non-agent host: %s", name)
             return {"host": name, "created": False}
         # New host in the tenant's group, tagged as an agent host.
         params = {"host": name, "name": hostname, **tls,
@@ -214,8 +274,14 @@ class ZabbixEngine:
     async def sync(self, devices: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, Any]:
         """Reconcile LM's device list into Zabbix. Also serves as the rebuild:
         a fresh Zabbix repopulates entirely from the inventory."""
-        # Run the sync.
-        result = await HostSync(self._client(), self.config).run(devices, dry_run=dry_run)
+        try:
+            result = await HostSync(self._client(), self.config).run(devices, dry_run=dry_run)
+        except Exception as e:
+            sanitized = self._sanitize_err(str(e))
+            logger.error("zabbix engine sync failed: %s", sanitized)
+            result = {"created": 0, "refreshed": 0, "disabled": 0, "deleted": 0, "purged": 0,
+                      "message": sanitized,
+                      "errors": [f"sync failed: {sanitized}"], "held": [], "dry_run": dry_run}
         # Record the counts unless this was a dry run.
         if not dry_run:
             self.last_sync = {k: result[k] for k in

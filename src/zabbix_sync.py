@@ -18,6 +18,8 @@ once: the scanner no longer adds them, only hosts LM explicitly sends stay.
 # Standard library imports.
 import logging
 import hashlib
+import hmac
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,7 +67,8 @@ IMPORT_RULES = {k: {"createMissing": True} for k in (
 def device_key(tenant: str, name: str) -> str:
     """Stable identity for a device. LM can list one device several times (one
     entry per management address), so identity is tenant + name, not entry id."""
-    return f"{tenant}/{name}".strip().lower()
+    safe_tenant = str(tenant or "default").strip().lower().replace("/", "_")
+    return f"{safe_tenant}/{str(name or '').strip().lower()}"
 
 
 def dedupe_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -86,14 +89,24 @@ def proxy_name_for(tenant: str) -> str:
     return "lm-" + re.sub(r"[^A-Za-z0-9._-]+", "-", str(tenant or "default"))
 
 
-def cred_fingerprint(secret: Optional[str]) -> str:
-    """Short SHA-256 fingerprint of a secret ("" if none), safe to store as a tag."""
-    return hashlib.sha256(secret.encode()).hexdigest()[:12] if secret else ""
+def cred_fingerprint(secret: Optional[str], key: Optional[str] = None) -> str:
+    """Short HMAC-SHA-256 fingerprint of a secret ("" if none), safe to store as a tag.
+    Keyed by the environment/spoke secret so that readers of Zabbix tags cannot perform
+    offline dictionary attacks against common SNMP community strings."""
+    if not secret:
+        return ""
+    secret_key = key or os.environ.get("LM_SECRET") or os.environ.get("ZABBIX_CRED_SALT")
+    if not secret_key:
+        secret_key = str(Path(__file__).resolve())
+    return hmac.new(secret_key.encode("utf-8"), str(secret).encode("utf-8"), hashlib.sha256).hexdigest()[:12]
 
 
 def host_name(key: str) -> str:
     """Zabbix technical host names only allow a limited character set."""
-    return re.sub(r"[^A-Za-z0-9._ -]", "_", key.replace("/", "--"))
+    tenant, _, name = key.partition("/")
+    clean_tenant = re.sub(r"[^A-Za-z0-9._-]", "_", tenant)
+    clean_name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    return f"{clean_tenant}--{clean_name}"
 
 
 def to_iso(dt: datetime) -> str:
@@ -103,9 +116,12 @@ def to_iso(dt: datetime) -> str:
 
 def parse_iso(value: str) -> Optional[datetime]:
     """Parse a UTC ISO string ending in Z; None if invalid."""
+    if not value or not isinstance(value, str):
+        return None
     try:
-        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
+        return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as e:
+        logger.debug("parse_iso failed for %r: %s", value, e)
         return None
 
 
@@ -144,7 +160,7 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
         # LM moved the device to another tenant: re-key its existing host
         # (name, group, proxy) instead of creating a duplicate beside it.
         old = device_key(d.get("moved_from") or "", d.get("name") or "") if d.get("moved_from") else ""
-        if old and old in existing and old not in seen_keys:
+        if old and old in existing and old not in seen_keys and existing[old].get("tenant") == d.get("moved_from"):
             refresh.append((existing[old], d))
             seen_keys.add(old)
         else:
@@ -166,7 +182,9 @@ def build_plan(existing: Dict[str, Dict[str, Any]], devices: List[Dict[str, Any]
 
     purge_hosts = [{**h, "key": k} for k, h in existing.items() if seen_keys and k not in seen_keys
                    and (_ip_named(k) or _superseded(k, h)
-                        or not any(str(i.get("type")) == "2" for i in h.get("interfaces") or []))]
+                        or not any(str(i.get("type")) == "2" for i in h.get("interfaces") or []))
+                   and not any(t.get("tag") == "lm-agent" for t in h.get("tags") or [])
+                   and h.get("tenant") == k.split("/", 1)[0]]
     purged = {h["key"] for h in purge_hosts}
 
     # Unseen hosts: disable after stale_days, delete after delete_days disabled.
