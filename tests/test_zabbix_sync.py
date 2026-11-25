@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest  # noqa: E402
+
 import zabbix_sync as zs  # noqa: E402
+from zabbix_api import ZabbixApiError, ZabbixReadOnlyError  # noqa: E402
 
 NOW = datetime(2026, 11, 1, tzinfo=timezone.utc)
 CFG = {**zs.DEFAULTS, "templates": {"cx_switch": "Aruba CX by SNMP"}}
@@ -296,6 +299,31 @@ def test_agent_interface_dropped_once_snmp_interface_exists():
     assert [i["type"] for i in host["interfaces"]] == ["2"]
 
 
+@pytest.mark.parametrize("error, refreshed", [
+    # Zabbix refuses while items still use the interface: logged, retried next sync.
+    (ZabbixApiError("hostinterface.delete: Interface is linked to items"), 1),
+    # This spoke refused the write (read-only came on mid-sync): the refresh
+    # fails, so the hub does not record a sync that wrote nothing as a success.
+    (ZabbixReadOnlyError("read-only on this environment: hostinterface.delete refused"), 0),
+], ids=["in-use", "refused"])
+def test_a_failed_agent_interface_drop(error, refreshed):
+    api = FakeApi()
+    h = zs.HostSync(api, CFG)
+    d = {**dev("sw", type_="x"), "snmp": True, "snmp_community": "c"}
+    run(h.run([{**d, "snmp": False}], now=NOW))
+    run(h.run([d], now=NOW))
+    real_call = api.call
+
+    async def call(method, params=None):
+        if method == "hostinterface.delete":
+            raise error
+        return await real_call(method, params)
+    api.call = call
+    summary = run(h.run([d], now=NOW))
+    assert summary["refreshed"] == refreshed
+    assert [e.endswith(str(error)) for e in summary["errors"]] == ([] if refreshed else [True])
+
+
 class AgentApi:
     def __init__(self):
         self.created = []
@@ -399,3 +427,28 @@ def test_zfs_memory_triggers_are_disabled_on_an_existing_template():
     res = run(zs.HostSync(api, CFG).run([], now=NOW))
     assert res["triggers_disabled"] == 1 and not res["errors"]
     assert [t["status"] for t in api.triggers] == ["1", "0"]
+
+
+def test_parse_iso_robust():
+    # Valid ISO string
+    dt = zs.parse_iso("2026-11-24T18:00:00Z")
+    assert dt is not None
+    assert dt.year == 2026
+    # Invalid strings / types return None gracefully without raising
+    assert zs.parse_iso("") is None
+    assert zs.parse_iso(None) is None
+    assert zs.parse_iso("not-a-date") is None
+    assert zs.parse_iso(12345) is None
+
+
+def test_cred_fingerprint_salted():
+    # Empty secret gives empty string
+    assert zs.cred_fingerprint("") == ""
+    assert zs.cred_fingerprint(None) == ""
+    # Fingerprint is 12 chars hex
+    fp = zs.cred_fingerprint("public")
+    assert len(fp) == 12
+    # Ensure it is salted (not bare sha256)
+    import hashlib
+    bare_sha256 = hashlib.sha256(b"public").hexdigest()[:12]
+    assert fp != bare_sha256
