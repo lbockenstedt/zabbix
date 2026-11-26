@@ -35,6 +35,11 @@ class FakeApi:
 
     async def call(self, method, params=None):
         self.calls.append(method)
+        if method == "apiinfo.version":
+            return "7.0.1"
+        if method == "template.get" and "search" in params:
+            words = [w.lower() for w in params["search"]["name"]]
+            return [{"name": n} for n in self.templates if any(w in n.lower() for w in words)]
         if method == "template.get":
             return [{"templateid": self.templates[n], "name": n}
                     for n in params["filter"]["name"] if n in self.templates]
@@ -452,3 +457,60 @@ def test_cred_fingerprint_salted():
     import hashlib
     bare_sha256 = hashlib.sha256(b"public").hexdigest()[:12]
     assert fp != bare_sha256
+
+
+PDU_YAML = """zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 7df96b18c230490a9a0a9e2307226338
+      name: Templates
+  templates:
+    - uuid: 11111111111111111111111111111111
+      template: 'Acme PDU by SNMP'
+      name: 'Acme PDU by SNMP'
+      groups:
+        - name: Templates
+      items:
+        - uuid: 22222222222222222222222222222222
+          name: 'Total load'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.1.1.0
+          key: pdu.load
+"""
+
+
+def test_find_templates_searches_by_vendor_words_and_reports_version():
+    api = FakeApi(templates=("ICMP Ping", "APC UPS by SNMP", "Network Generic Device by SNMP"))
+    res = run(zs.HostSync(api, CFG).find_templates("APC Web/SNMP Management Card (MB:v6.1.1)"))
+    assert res["templates"] == ["APC UPS by SNMP"] and res["zabbix_version"] == "7.0.1"
+
+
+def test_install_template_creates_once_and_never_overwrites():
+    api = FakeApi()
+    sync = zs.HostSync(api, CFG)
+    assert run(sync.install_template(PDU_YAML)) == {"installed": True, "template": "Acme PDU by SNMP"}
+    again = run(sync.install_template(PDU_YAML))
+    assert again["installed"] is False and again["exists"] is True
+    assert api.calls.count("configuration.import") == 1
+
+
+@pytest.mark.parametrize("bad", [
+    PDU_YAML.replace("type: SNMP_AGENT", "type: EXTERNAL"),
+    PDU_YAML.replace("          type: SNMP_AGENT\n", ""),
+    PDU_YAML.replace("  templates:", "  hosts:\n    - host: x\n  templates:"),
+    "not: [yaml",
+])
+def test_install_template_refuses_unsafe_or_malformed_templates(bad):
+    api = FakeApi()
+    res = run(zs.HostSync(api, CFG).install_template(bad))
+    assert res["installed"] is False and res["error"] and "configuration.import" not in api.calls
+
+
+def test_llm_chosen_template_is_linked_and_falls_back_when_missing():
+    api = FakeApi(templates=("ICMP Ping", "Network Generic Device by SNMP", "Acme PDU by SNMP"))
+    run(zs.HostSync(api, CFG).run([{**dev("PDU1"), "template": "Acme PDU by SNMP"}], now=NOW))
+    assert {t["name"] for t in next(iter(api.hosts.values()))["parentTemplates"]} == {"Acme PDU by SNMP"}
+    api2 = FakeApi()
+    run(zs.HostSync(api2, CFG).run([{**dev("PDU2"), "template": "Gone by SNMP"}], now=NOW))
+    assert {t["name"] for t in next(iter(api2.hosts.values()))["parentTemplates"]} == \
+        {"Network Generic Device by SNMP"}

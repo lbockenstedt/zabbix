@@ -24,7 +24,8 @@ _SENSITIVE = {
 
 # Commands that change Zabbix. Only the sync commands have a dry run that
 # writes nothing; registering a proxy or an agent always writes.
-_WRITE_COMMANDS = {"MON_PROXY_REGISTER", "MON_AGENT_REGISTER", "MON_SYNC", "MON_REBUILD"}
+_WRITE_COMMANDS = {"MON_PROXY_REGISTER", "MON_AGENT_REGISTER", "MON_SYNC", "MON_REBUILD",
+                   "MON_TEMPLATE_INSTALL"}
 _DRY_RUN_COMMANDS = {"MON_SYNC", "MON_REBUILD"}
 READ_ONLY_MESSAGE = "Zabbix is read-only on this environment; only reads and sync dry runs are allowed"
 # The hub's read-only switch and the time it was saved (see _drop_older_read_only).
@@ -94,7 +95,8 @@ class ZabbixSpoke(BaseSpoke):
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Commands: UPDATE_CONFIG, GET_VERSION, MON_STATUS, MON_HOSTS,
-        MON_SYNC (devices, dry_run), MON_REBUILD (devices; full repopulate)."""
+        MON_SYNC (devices, dry_run), MON_REBUILD (devices; full repopulate),
+        MON_TEMPLATE_FIND (sys_descr), MON_TEMPLATE_INSTALL (template_yaml)."""
         # Ensure data is treated safely before accessing .get()
         safe_data = data if isinstance(data, dict) else {}
         cmd = str(command_type or "").upper()
@@ -179,6 +181,13 @@ class ZabbixSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "devices list required"}
             result = await self.engine.sync(devices, dry_run=bool(data.get("dry_run")))
             return {"status": "ERROR" if result["errors"] else "SUCCESS", **result}
+        # Search Zabbix's templates for a device type (read-only).
+        if cmd == "MON_TEMPLATE_FIND":
+            return {"status": "SUCCESS", **await self.engine.find_templates(str(data.get("sys_descr") or ""))}
+        # Install a template LM generated; it is validated here again (never trusted).
+        if cmd == "MON_TEMPLATE_INSTALL":
+            res = await self.engine.install_template(str(data.get("template_yaml") or ""))
+            return {"status": "ERROR" if res.get("error") else "SUCCESS", **res}
         # Unknown command.
         return {"status": "ERROR", "message": f"unknown command {cmd or '<empty>'}"}
 

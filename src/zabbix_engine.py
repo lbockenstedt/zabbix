@@ -271,6 +271,14 @@ class ZabbixEngine:
         return {"host": name, "created": True, "proxied": bool(proxyid),
                 "templated": bool(templates)}
 
+    async def find_templates(self, sys_descr: str) -> Dict[str, Any]:
+        """Templates in Zabbix that look like they fit a device (see HostSync.find_templates)."""
+        return await HostSync(self._client(), self.config).find_templates(sys_descr)
+
+    async def install_template(self, text: str) -> Dict[str, Any]:
+        """Install a validated, SNMP-only template LM generated for a new device type."""
+        return await HostSync(self._client(), self.config).install_template(text)
+
     async def sync(self, devices: List[Dict[str, Any]], dry_run: bool = False) -> Dict[str, Any]:
         """Reconcile LM's device list into Zabbix. Also serves as the rebuild:
         a fresh Zabbix repopulates entirely from the inventory."""

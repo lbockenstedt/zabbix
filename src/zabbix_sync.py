@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import zabbix_templates
 from zabbix_api import ZabbixReadOnlyError
 
 logger = logging.getLogger("ZabbixSync")
@@ -130,8 +131,11 @@ def templates_for(device: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
     SNMP template (it already carries the ICMP check, so the two clash).
     Without one: ICMP Ping only — type templates poll over SNMP and Zabbix
     refuses to link them to a host that has no SNMP interface."""
-    # With SNMP: the type's template, else the generic SNMP template.
+    # With SNMP: the template LM chose for this device type, the type's template,
+    # else the generic SNMP template.
     if device.get("snmp"):
+        if device.get("template"):
+            return [str(device["template"])]
         return [cfg["templates"].get(device.get("type") or "") or cfg["snmp_template"]]
     # Without SNMP: ICMP only.
     return [cfg["fallback_template"]]
@@ -265,6 +269,40 @@ class HostSync:
                     changed += 1
         return changed
 
+    async def _wanted(self, device: Dict[str, Any]) -> List[str]:
+        """The templates for a device; an LM-chosen template Zabbix no longer has
+        falls back to the generic one so the host is still created and polled."""
+        wanted = templates_for(device, self.cfg)
+        if device.get("template") and not await self._ids("template.get", wanted, "templateid"):
+            logger.warning("zabbix sync: template %r is not in Zabbix, using the generic one", wanted[0])
+            return [self.cfg["snmp_template"]]
+        return wanted
+
+    async def find_templates(self, sys_descr: str) -> Dict[str, Any]:
+        """Template names in Zabbix that mention the device's vendor or model words,
+        and the Zabbix version (a generated template must match its export format)."""
+        terms = zabbix_templates.search_terms(sys_descr)
+        names: List[str] = []
+        if terms:
+            found = await self.api.call("template.get", {
+                "output": ["name"], "search": {"name": terms}, "searchByAny": True, "limit": 60})
+            names = sorted({str(f.get("name")) for f in found or [] if f.get("name")})
+        return {"terms": terms, "templates": names,
+                "zabbix_version": str(await self.api.call("apiinfo.version") or "")}
+
+    async def install_template(self, text: str) -> Dict[str, Any]:
+        """Import one validated SNMP-only template, creating it only when Zabbix
+        does not have it (an existing template is never changed)."""
+        name, error = zabbix_templates.validate_template(text)
+        if error:
+            return {"installed": False, "error": error}
+        if await self._ids("template.get", [name], "templateid"):
+            return {"installed": False, "template": name, "exists": True}
+        await self.api.call("configuration.import",
+                            {"format": "yaml", "source": text, "rules": IMPORT_RULES})
+        logger.info("zabbix sync: installed generated template %s", name)
+        return {"installed": True, "template": name}
+
     async def load_existing(self) -> Dict[str, Dict[str, Any]]:
         """Load managed hosts from Zabbix, keyed by their lm-key tag."""
         # Fetch hosts tagged as managed, with tags, groups, templates and interfaces.
@@ -353,7 +391,7 @@ class HostSync:
     async def _create(self, device: Dict[str, Any], now: datetime) -> None:
         """Create a Zabbix host for a new device."""
         # Pick templates and fingerprint the SNMP secret.
-        wanted = templates_for(device, self.cfg)
+        wanted = await self._wanted(device)
         community = device.get("snmp_community") or ""
         cred = cred_fingerprint(community)
         # Look up template ids; all must exist.
@@ -419,7 +457,7 @@ class HostSync:
         elif not proxyid and host.get("proxyid", "0") != "0":
             params.update({"monitored_by": 0, "proxyid": 0})
         # Update templates if they changed.
-        want = templates_for(device, self.cfg)
+        want = await self._wanted(device)
         if set(want) != host["templates"]:
             params["templates"] = await self._ids("template.get", want, "templateid")
             # Clear the replaced templates' items too, or they keep polling.
